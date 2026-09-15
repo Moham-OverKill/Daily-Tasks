@@ -1,5 +1,8 @@
 # Daily Tasks
 
+[![Download Daily Tasks](https://img.shields.io/badge/Download-DailyTasksSetup.exe-2ea44f?style=for-the-badge&logo=windows)](https://github.com/Moham-OverKill/Daily-Tasks/releases/download/v1.2.0/DailyTasksSetup.exe)
+[![Latest Release](https://img.shields.io/badge/Release-v1.2.0-blue?style=for-the-badge)](https://github.com/Moham-OverKill/Daily-Tasks/releases/tag/v1.2.0)
+
 A modern, high-performance desktop task and daily routine manager built with **Python** and **PySide6 (Qt6)**. Designed for speed, minimal resource usage, and seamless task tracking throughout the day.
 
 ---
