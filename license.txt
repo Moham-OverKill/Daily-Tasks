@@ -1,0 +1,23 @@
+DAILY TASKS APPLICATION
+TERMS OF SERVICE
+
+1. ACCEPTANCE OF TERMS
+By installing and using this application ("Daily Tasks"), you agree to be bound by these terms.
+
+2. LICENSE
+This application is provided as freeware. You may use it for personal or commercial purposes.
+
+3. DISCLAIMER OF WARRANTY
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+4. PRIVACY
+This application stores data locally on your device. No personal data is transmitted to external servers by the developer.
+
+5. TERMINATION
+We reserve the right to terminate your right to use the software at any time for any reason.
+
+6. GOVERNING LAW
+These terms shall be governed by the laws of the jurisdiction in which the developer resides.
+
+7. ACKNOWLEDGEMENT
+By clicking "I accept the agreement" during installation, you acknowledge that you have read and understood these terms.

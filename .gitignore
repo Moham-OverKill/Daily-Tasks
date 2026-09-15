@@ -1,0 +1,36 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Python virtual environment
+.venv/
+env/
+venv/
+ENV/
+
+# PyInstaller / Build outputs
+build/
+dist/
+Output/
+*.manifest
+*.spec.bak
+
+# Node dependencies (local Inno Setup compiler)
+node_modules/
+
+# Temporary / Binary executables
+upx.exe
+*.tmp
+tmp/
+instance.lock
+
+# Test scratch files
+tests/scratch_data/
+
+# IDE / Operating System artifacts
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+desktop.ini

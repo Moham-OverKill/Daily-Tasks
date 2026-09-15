@@ -1,0 +1,57 @@
+[
+    {
+        "id": "895406bd-6174-4ec4-b376-8269cf26a8c3",
+        "name": "Maghrib",
+        "start_time": "17:32",
+        "end_time": "18:51",
+        "image_path": "\ud83c\udf07",
+        "status": "pending",
+        "is_synced": true,
+        "enabled": true,
+        "created_at": "2026-02-01T04:08:09.260130"
+    },
+    {
+        "id": "8c14af13-ea7c-4fdf-b76c-bdd5ef412c52",
+        "name": "Isha",
+        "start_time": "18:51",
+        "end_time": "23:59",
+        "image_path": "\ud83c\udf19",
+        "status": "pending",
+        "is_synced": true,
+        "enabled": true,
+        "created_at": "2026-02-01T04:08:09.260394"
+    },
+    {
+        "id": "ea93227e-fa12-463d-b523-0b244e638827",
+        "name": "Fajr",
+        "start_time": "05:16",
+        "end_time": "12:08",
+        "image_path": "\ud83c\udf05",
+        "status": "done",
+        "is_synced": true,
+        "enabled": true,
+        "created_at": "2026-02-01T04:31:56.529619"
+    },
+    {
+        "id": "fd414449-db46-453a-b492-89f21a10c08c",
+        "name": "Dhuhr",
+        "start_time": "12:08",
+        "end_time": "15:09",
+        "image_path": "\u2600\ufe0f",
+        "status": "active",
+        "is_synced": true,
+        "enabled": true,
+        "created_at": "2026-02-01T04:31:56.529989"
+    },
+    {
+        "id": "72a77803-8364-4682-b7de-d0c40f60aab0",
+        "name": "Asr",
+        "start_time": "15:09",
+        "end_time": "17:32",
+        "image_path": "\ud83c\udf24\ufe0f",
+        "status": "pending",
+        "is_synced": true,
+        "enabled": true,
+        "created_at": "2026-02-01T04:31:56.530222"
+    }
+]
