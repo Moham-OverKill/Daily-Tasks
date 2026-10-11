@@ -7,199 +7,188 @@ Complete feature parity with original CustomTkinter version
 import sys
 import os
 import json
+import time
 import ctypes
 from ctypes import wintypes
 import threading
 import math
 from datetime import datetime, timedelta
 from PySide6.QtWidgets import (
-    QApplication, QMainWindow, QWidget, QVBoxLayout, 
+    QApplication, QMainWindow, QWidget, QDialog, QVBoxLayout, 
     QHBoxLayout, QScrollArea, QGridLayout, QFrame, QLabel,
-    QSystemTrayIcon, QMenu, QSizePolicy, QGraphicsOpacityEffect
+    QSystemTrayIcon, QMenu, QSizePolicy, QGraphicsOpacityEffect,
+    QAbstractButton, QComboBox, QSlider, QLineEdit, QTextEdit, QPlainTextEdit
 )
 from . import share_handler
-from PySide6.QtCore import Qt, QTimer, Signal, QCoreApplication, QEvent, QPoint, QObject
-from PySide6.QtGui import QFont, QFontDatabase, QIcon, QPixmap, QPainter, QColor, QAction, QCursor, QPen, QBrush
-from PySide6.QtNetwork import QLocalServer, QLocalSocket
-from PIL import Image, ImageDraw, ImageFont
-import io
-
-# Windows notification support
-try:
-    from plyer import notification
-    HAS_PLYER = True
-except ImportError:
-    HAS_PLYER = False
+from PySide6.QtCore import Qt, QTimer, Signal, QCoreApplication, QEvent, QPoint, QPointF, QRectF, QObject, QEasingCurve, QVariantAnimation
+from PySide6.QtGui import QFont, QFontDatabase, QIcon, QPixmap, QPainter, QColor, QAction, QCursor, QPen, QBrush, QLinearGradient
 
 from .qt_effects import ParticleBackground
-from .qt_components import TaskCard, Sidebar, AddTaskDialog, SettingsPanel, CustomTitleBar, ModernDialogs
-from .task_manager import TaskManager
+from .qt_components import (
+    TaskCard, Sidebar, AddTaskDialog, SettingsPanel, CustomTitleBar,
+    ModernDialogs, PageButton, InfoBadge, _draw_dashed_rounded_rect,
+    get_theme_spec, is_light_theme, apply_window_theme_frame, THEME_OPTIONS
+)
+from .task_manager import TaskManager, _parse_hhmm_to_secs
 from .sound_manager import SoundManager
-from .constants import ICON_CATEGORIES
+from .constants import ICON_CATEGORIES, APP_VERSION
+from .updater import UpdateManager
 
-DARK_THEME_CSS = """
-    QWidget {
-        color: #ffffff;
-        background-color: #0d0d0d;
-        font-family: "Roboto";
-    }
+
+class _Win32PipeServer(QObject):
+    """Zero-dependency Win32 Named Pipe IPC server replacing PySide6.QtNetwork.QLocalServer."""
+    activated = Signal()
+
+    def __init__(self, pipe_name=r"\\.\pipe\DailyTasksAppIPCV2_5", parent=None):
+        super().__init__(parent)
+        self.pipe_name = pipe_name
+        self._running = False
+        self._pending = False
+        self._thread = None
+
+    def listen(self):
+        if sys.platform != "win32" or self._running:
+            return True
+        self._running = True
+        self._thread = threading.Thread(target=self._serve_loop, daemon=True)
+        self._thread.start()
+        return True
+
+    def _serve_loop(self):
+        kernel32 = ctypes.windll.kernel32
+        kernel32.CreateNamedPipeW.restype = ctypes.c_void_p
+        kernel32.ConnectNamedPipe.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        kernel32.DisconnectNamedPipe.argtypes = [ctypes.c_void_p]
+        kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+
+        PIPE_ACCESS_DUPLEX = 0x00000003
+        PIPE_TYPE_BYTE = 0x00000000
+        PIPE_WAIT = 0x00000000
+        INVALID_HANDLES = (None, 0, -1, 0xFFFFFFFF, 0xFFFFFFFFFFFFFFFF)
+
+        h_pipe = kernel32.CreateNamedPipeW(
+            self.pipe_name,
+            PIPE_ACCESS_DUPLEX,
+            PIPE_TYPE_BYTE | PIPE_WAIT,
+            255, 128, 128, 0, None
+        )
+        if h_pipe in INVALID_HANDLES:
+            self._running = False
+            return
+
+        try:
+            while self._running:
+                ok = kernel32.ConnectNamedPipe(h_pipe, None)
+                err = kernel32.GetLastError() if not ok else 0
+                if ok or err in (535, 232):  # ERROR_PIPE_CONNECTED (535) or ERROR_NO_DATA (232)
+                    self._pending = True
+                    try:
+                        self.activated.emit()
+                    except RuntimeError:
+                        break
+                    kernel32.DisconnectNamedPipe(h_pipe)
+                else:
+                    time.sleep(0.05)
+        finally:
+            kernel32.CloseHandle(h_pipe)
+
+
+def _build_global_theme_css(spec):
+    ar, ag, ab = spec['accent_rgb']
+    is_light = spec['is_light']
+    sel_bg = f"rgba({ar}, {ag}, {ab}, 52)" if is_light else spec['accent_primary']
+    sel_fg = spec['text_main'] if is_light else "#FFFFFF"
+    return f"""
+    QWidget {{
+        color: {spec['text_main']};
+        font-family: "Segoe UI";
+    }}
+    QDialog {{
+        background-color: {spec['dialog_bg']};
+        color: {spec['text_main']};
+    }}
     
-    QComboBox {
-        color: #ffffff;
-        background-color: #333333;
-        border: 1px solid #555555;
+    QComboBox {{
+        color: {spec['text_main']};
+        background-color: {spec['input_bg']};
+        border: 1px solid {spec['input_border']};
         padding: 6px;
-        border-radius: 4px;
-    }
-    QComboBox:hover { border: 1px solid #777777; }
-    QComboBox::down-arrow {
+        border-radius: 6px;
+    }}
+    QComboBox:hover {{ border: 1px solid {spec['accent']}; }}
+    QComboBox::down-arrow {{
         image: none;
         width: 0px; height: 0px;
         margin: 0px;
         border: none;
-    }
-    QComboBox::drop-down { border: none; width: 0px; }
-    QComboBox QAbstractItemView {
-        color: #ffffff;
-        background-color: #333333;
-        border: 1px solid #555555;
-        selection-background-color: #555555;
-        selection-color: #ffffff;
+    }}
+    QComboBox::drop-down {{ border: none; width: 0px; }}
+    QComboBox QAbstractItemView {{
+        color: {spec['text_main']};
+        background-color: {spec['dialog_bg']};
+        border: 1px solid {spec['input_border']};
+        selection-background-color: {sel_bg};
+        selection-color: {sel_fg};
         outline: none;
-    }
+    }}
     
-    QLineEdit {
-        color: #ffffff;
-        background-color: #333333;
-        border: 1px solid #555555;
-        padding: 6px;
-        border-radius: 4px;
-    }
-    QLineEdit:focus { border: 1px solid #00BCD4; }
+    QLineEdit {{
+        color: {spec['text_main']};
+        background-color: {spec['input_bg']};
+        border: 1px solid {spec['input_border']};
+        padding: 6px 8px;
+        border-radius: 6px;
+    }}
+    QLineEdit:focus {{ border: 1px solid {spec['accent']}; }}
     
-    QLabel { color: #ffffff; background-color: transparent; }
+    QLabel {{ color: {spec['text_main']}; background-color: transparent; }}
     
-    QToolTip {
-        background-color: #1e1e1e;
-        color: #ffffff;
-        border: 1px solid #555555;
-        border-radius: 4px;
-        padding: 10px;
-    }
+    QToolTip {{
+        background-color: {spec['dialog_bg']};
+        color: {spec['text_main']};
+        border: 1px solid {spec['input_border']};
+        border-radius: 6px;
+        padding: 8px 10px;
+    }}
 
+    QScrollBar:vertical {{
+        background: transparent; width: 8px; border: none;
+    }}
+    QScrollBar::handle:vertical {{
+        background: rgba({ar}, {ag}, {ab}, 95); border-radius: 4px; min-height: 24px;
+    }}
+    QScrollBar::handle:vertical:hover {{
+        background: {spec['accent']};
+    }}
+    QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0px; }}
     
-    QScrollBar:vertical {
-        background: #2b2b2b; width: 10px; border: none;
-    }
-    QScrollBar::handle:vertical {
-        background: #555555; border-radius: 5px; min-height: 20px;
-    }
-    QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0px; }
-    
-    QMenu {
-        background-color: #2b2b2b !important;
-        color: #ffffff !important;
-        border: 1px solid #555555 !important;
+    QMenu {{
+        background-color: {spec['dialog_bg']} !important;
+        color: {spec['text_main']} !important;
+        border: 1px solid {spec['input_border']} !important;
         padding: 5px !important;
-        border-radius: 6px !important;
-    }
-    QMenu::item {
+        border-radius: 8px !important;
+    }}
+    QMenu::item {{
         padding: 6px 24px !important;
         background: transparent !important;
-        border-radius: 4px !important;
-    }
-    QMenu::item:selected {
-        background-color: #3b3b3b !important;
-        color: #ffffff !important;
-    }
-    QMenu::separator {
+        border-radius: 5px !important;
+    }}
+    QMenu::item:selected {{
+        background-color: rgba({ar}, {ag}, {ab}, 55) !important;
+        color: {spec['accent']} !important;
+    }}
+    QMenu::separator {{
         height: 1px !important;
-        background: #555555 !important;
+        background: {spec['input_border']} !important;
         margin: 4px 8px !important;
-    }
+    }}
 """
 
-LIGHT_THEME_CSS = """
-    QWidget {
-        color: #000000;
-        background-color: #F5F5F7;
-        font-family: "Roboto";
-    }
-    
-    QComboBox {
-        color: #000000;
-        background-color: #ffffff;
-        border: 1px solid #cccccc;
-        padding: 6px;
-        border-radius: 4px;
-    }
-    QComboBox:hover { border: 1px solid #aaaaaa; }
-    QComboBox::down-arrow {
-        image: none;
-        width: 0px; height: 0px;
-        margin: 0px;
-        border: none;
-    }
-    QComboBox::drop-down { border: none; width: 0px; }
-    QComboBox QAbstractItemView {
-        color: #000000;
-        background-color: #ffffff;
-        border: 1px solid #cccccc;
-        selection-background-color: #e0e0e0;
-        selection-color: #000000;
-        outline: none;
-    }
-    
-    QLineEdit {
-        color: #000000;
-        background-color: #ffffff;
-        border: 1px solid #cccccc;
-        padding: 6px;
-        border-radius: 4px;
-    }
-    QLineEdit:focus { border: 1px solid #00BCD4; }
-    
-    QLabel { color: #000000; background-color: transparent; }
-    
-    QMenu {
-        background-color: #ffffff !important;
-        color: #000000 !important;
-        border: 1px solid #cccccc !important;
-        padding: 5px !important;
-        border-radius: 6px !important;
-    }
-    QMenu::item {
-        padding: 6px 24px !important;
-        background: transparent !important;
-        border-radius: 4px !important;
-    }
-    QMenu::item:selected {
-        background-color: #f0f0f0 !important;
-        color: #000000 !important;
-    }
-    QMenu::separator {
-        height: 1px !important;
-        background: #cccccc !important;
-        margin: 4px 8px !important;
-    }
-    
-    QToolTip {
-        background-color: #ffffff;
-        color: #000000;
-        border: 1px solid #cccccc;
-        border-radius: 4px;
-        padding: 10px;
-    }
-    
-    QScrollBar:vertical {
-        background: #f0f0f0; width: 10px; border: none;
-    }
-    QScrollBar::handle:vertical {
-        background: #bbbbbb; border-radius: 5px; min-height: 20px;
-    }
-    QScrollBar::handle:vertical:hover { background: #999999; }
-    QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0px; }
-"""
+
+DARK_THEME_CSS = _build_global_theme_css(get_theme_spec("dark"))
+LIGHT_THEME_CSS = _build_global_theme_css(get_theme_spec("light"))
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # BUG-02 / OPT-03: Define _FLASHWINFO once at module level instead of
@@ -252,12 +241,25 @@ class DailyTasksWindow(QMainWindow):
         self.prayer_mode_enabled = False
         self.simple_mode_enabled = False
         self.hardcore_mode_enabled = False
+        self.ui_sounds_enabled = True
+        self.ui_volume = 80
         self.current_theme = "dark"  # dark or light
         self.task_cards = {}
         self.cols = 4
         self.current_date_str = datetime.now().strftime("%Y-%m-%d")
         self.last_badge_count = -1
         self.active_page_id = self.task_manager.get_default_page_id()
+        self._settings_panel = None
+        self._prayer_loading = False
+        self._silent_prayer_sync = False
+        self.update_manager = None
+        self._update_state = {
+            "state": "up_to_date",
+            "version": APP_VERSION,
+            "download_url": "",
+            "progress": 0,
+            "message": "",
+        }
         
         # Settings Storage Paths
         appdata = os.environ.get('APPDATA', os.path.expanduser('~'))
@@ -273,47 +275,224 @@ class DailyTasksWindow(QMainWindow):
         # Tray Support
         self.tray_icon = None
         
+        # Preload lightweight settings before building UI so cards are built only once
+        self._preload_settings()
+        
         self._setup_window()
         self._setup_ui()
+        self._apply_theme(self.current_theme, save=False)
         self._load_tasks(animate=False, first_load=True)
-        self._update_app_icon()
         
-        # Defer non-critical startup operations so main window displays instantly
-        QTimer.singleShot(10, self._deferred_startup)
-        
+        # Defer non-critical startup operations so main window displays immediately
+        QTimer.singleShot(0, self._deferred_startup)
+
+    def _preload_settings(self):
+        """Read lightweight user preferences before building the UI to prevent double rendering."""
+        try:
+            with open(self.settings_path, 'r') as f:
+                settings = json.load(f)
+
+            self.dnd_enabled = settings.get('dnd_enabled', False)
+            self.prayer_mode_enabled = settings.get('prayer_mode_enabled', False)
+            self.simple_mode_enabled = settings.get('simple_mode_enabled', False)
+            self.hardcore_mode_enabled = settings.get('hardcore_mode_enabled', False)
+            self.ui_sounds_enabled = settings.get('ui_sounds_enabled', True)
+            self.ui_volume = int(settings.get('ui_volume', 80))
+            self.current_theme = settings.get('theme', 'dark')
+            self._initial_scroll_pos = settings.get('scroll_position', 0)
+
+            saved_page = settings.get('active_page_id')
+            if saved_page and self.task_manager._find_page(saved_page):
+                self.active_page_id = saved_page
+
+            today_str = datetime.now().strftime("%Y-%m-%d")
+            last_date = settings.get('last_opened_date', today_str)
+            if last_date != today_str:
+                self.task_manager.reset_daily_tasks()
+
+            if not self.prayer_mode_enabled:
+                self.task_manager.remove_synced_tasks()
+
+            self.task_manager.synchronize_task_statuses()
+            self._last_opened_date = today_str
+            self.sound_manager.set_dnd(self.dnd_enabled)
+            self.sound_manager.set_ui_sounds_enabled(self.ui_sounds_enabled)
+            self.sound_manager.set_ui_volume(self.ui_volume)
+        except (FileNotFoundError, json.JSONDecodeError):
+            self.task_manager.synchronize_task_statuses()
+            self._last_opened_date = datetime.now().strftime("%Y-%m-%d")
+
+    @property
+    def settings_panel(self):
+        return self._ensure_settings_panel()
+
+    def _ensure_settings_panel(self):
+        """Lazily construct SettingsPanel on first request."""
+        if self._settings_panel is None:
+            parent = self.centralWidget() or self
+            panel = SettingsPanel(parent)
+            panel.hide()
+            panel._set_theme(self.current_theme)
+            panel.apply_theme(self.current_theme)
+            panel.set_values(
+                self.dnd_enabled,
+                self.prayer_mode_enabled,
+                self.simple_mode_enabled,
+                self.hardcore_mode_enabled,
+                self.ui_sounds_enabled,
+                self.ui_volume
+            )
+            panel.set_prayer_loading(self._prayer_loading)
+            panel.set_update_state(**self._update_state)
+            panel.close_clicked.connect(self._toggle_settings_panel)
+            panel.dnd_toggled.connect(self._toggle_dnd)
+            panel.prayer_mode_toggled.connect(self._toggle_prayer_mode)
+            panel.simple_mode_toggled.connect(self._toggle_simple_mode)
+            panel.hardcore_mode_toggled.connect(self._toggle_hardcore_mode)
+            panel.ui_sounds_toggled.connect(self._toggle_ui_sounds)
+            panel.ui_volume_changed.connect(self._on_ui_volume_changed)
+            panel.theme_changed.connect(self._apply_theme)
+            panel.check_updates_clicked.connect(self._on_check_updates_clicked)
+            panel.install_update_clicked.connect(self._on_install_update_clicked)
+            self._settings_panel = panel
+        return self._settings_panel
+
+    def _set_update_ui_state(
+        self,
+        state: str,
+        version: str = "",
+        download_url: str = "",
+        progress: int = 0,
+        message: str = "",
+    ):
+        """Cache update state and forward to SettingsPanel only if already instantiated."""
+        if version:
+            self._update_state["version"] = version.lstrip("vV")
+        if download_url:
+            self._update_state["download_url"] = download_url
+        self._update_state["state"] = state
+        self._update_state["progress"] = int(progress)
+        self._update_state["message"] = message or ""
+        if self._settings_panel is not None:
+            self._settings_panel.set_update_state(**self._update_state)
+
+    def _on_check_updates_clicked(self):
+        if self.update_manager is None:
+            self._init_update_manager()
+        self.update_manager.check_for_updates(silent=False)
+
+    def _on_install_update_clicked(self, version: str, download_url: str):
+        if self.update_manager is None:
+            self._init_update_manager()
+        self.update_manager.download_and_install(download_url=download_url, version=version)
+
+    def _on_update_check_started(self):
+        self._set_update_ui_state("checking")
+
+    def _on_update_up_to_date(self, current_ver: str):
+        if hasattr(self, "sidebar") and self.sidebar is not None:
+            self.sidebar.set_update_available(False)
+        self._set_update_ui_state("up_to_date", version=current_ver, message="Up to date")
+
+    def _on_update_available(self, latest_ver: str, download_url: str, _notes: str):
+        if hasattr(self, "sidebar") and self.sidebar is not None:
+            self.sidebar.set_update_available(True, latest_ver)
+        self._set_update_ui_state(
+            "update_available",
+            version=latest_ver,
+            download_url=download_url,
+        )
+
+    def _on_update_check_failed(self, err: str):
+        self._set_update_ui_state("error", message=err)
+
+    def _on_update_download_started(self, version: str):
+        self._set_update_ui_state("downloading", version=version, progress=0)
+
+    def _on_update_download_progress(self, pct: int):
+        self._set_update_ui_state(
+            "downloading",
+            version=self._update_state.get("version", ""),
+            download_url=self._update_state.get("download_url", ""),
+            progress=pct,
+        )
+
+    def _on_update_download_finished(self, installer_path: str):
+        self._set_update_ui_state(
+            "downloading",
+            version=self._update_state.get("version", ""),
+            progress=100,
+            message="Installing update...",
+        )
+        self.save_settings()
+        if self.update_manager is not None:
+            self.update_manager.launch_silent_installer(installer_path)
+
+    def _on_update_download_failed(self, err: str):
+        self._set_update_ui_state("error", message=err)
+
+    def _init_update_manager(self):
+        if self.update_manager is None:
+            self.update_manager = UpdateManager(self, on_quit_callback=self._force_quit)
+            self.update_manager.check_started.connect(self._on_update_check_started)
+            self.update_manager.up_to_date.connect(self._on_update_up_to_date)
+            self.update_manager.update_available.connect(self._on_update_available)
+            self.update_manager.check_failed.connect(self._on_update_check_failed)
+            self.update_manager.download_started.connect(self._on_update_download_started)
+            self.update_manager.download_progress.connect(self._on_update_download_progress)
+            self.update_manager.download_finished.connect(self._on_update_download_finished)
+            self.update_manager.download_failed.connect(self._on_update_download_failed)
+
     def _deferred_startup(self):
-        """Asynchronously initialize system tray, settings, IPC server, and timers after window display"""
+        """Asynchronously initialize system tray, timers, and background sync after window display"""
+        self._update_app_icon()
         if self.tray_icon is None:
             self._setup_tray()
-            
-        self._loading_settings = True
-        self.load_settings()
-        self._loading_settings = False
-        
-        if not hasattr(self, '_ipc_server') or self._ipc_server is None:
-            self._ipc_server = QLocalServer(self)
-            self._ipc_server.removeServer("DailyTasksAppIPCV2_5")
-            self._ipc_server.listen("DailyTasksAppIPCV2_5")
-            self._ipc_server.newConnection.connect(self._handle_ipc_activation)
             
         if not hasattr(self, 'update_timer') or self.update_timer is None:
             self.update_timer = QTimer(self)
             self.update_timer.timeout.connect(self._update_loop)
             self.update_timer.start(1000)
+
+        if self.prayer_mode_enabled:
+            self._sync_prayers_background(silent=True)
+
+        self._init_update_manager()
+        QTimer.singleShot(3000, lambda: self.update_manager.check_for_updates(silent=True))
         
     def _handle_ipc_activation(self):
         """Handle activation request from another instance"""
-        socket = self._ipc_server.nextPendingConnection()
-        socket.close()
+        if hasattr(self, '_ipc_server') and self._ipc_server is not None:
+            self._ipc_server._pending = False
         self._restore_window()
 
-        
+    def _get_base_icon_pixmap(self):
+        """Load and downscale base icon once to 128x128 (64 KB vs 4.2 MB full 1024x1024)."""
+        pix = getattr(self, '_base_icon_pixmap', None)
+        if pix is None:
+            if os.path.exists(self.icon_path):
+                raw = QPixmap(self.icon_path)
+                if not raw.isNull():
+                    pix = raw.scaled(128, 128, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                else:
+                    pix = raw
+            else:
+                pix = QPixmap()
+            self._base_icon_pixmap = pix
+        return pix
+
     def _setup_window(self):
         """Configure the main window"""
         self.setWindowTitle("Daily Tasks (V2.5 - New Engine)")
-        
-        if os.path.exists(self.icon_path):
-            self.setWindowIcon(QIcon(self.icon_path))
+        self._badge_icon_cache = {}
+        self._last_mouse_filter_t = 0.0
+
+        base_pix = self._get_base_icon_pixmap()
+        if not base_pix.isNull():
+            base_icon = QIcon(base_pix)
+            self._badge_icon_cache[(0, False)] = base_icon
+            self._badge_icon_cache[(0, True)] = base_icon
+            self.setWindowIcon(base_icon)
             
         # Dimensions will be dynamically set by _update_window_size during _load_tasks
         # or by user settings later.
@@ -324,11 +503,7 @@ class DailyTasksWindow(QMainWindow):
         
         # Enable transparency
         self.setAttribute(Qt.WA_TranslucentBackground)
-        self.setStyleSheet("background: transparent;")
-        
-        # Set window icon
-        if os.path.exists(self.icon_path):
-            self.setWindowIcon(QIcon(self.icon_path))
+        self.setStyleSheet("QMainWindow { background: transparent; }")
         
     def _setup_ui(self):
         """Build the UI structure"""
@@ -337,7 +512,7 @@ class DailyTasksWindow(QMainWindow):
         central.setObjectName("CentralWidget")
         central.setStyleSheet("""
             #CentralWidget {
-                background-color: #2B2B2B;
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #080C14, stop:0.5 #0D1424, stop:1 #0F172A);
             }
         """)
         self.setCentralWidget(central)
@@ -359,6 +534,7 @@ class DailyTasksWindow(QMainWindow):
         
         # Container for particles + UI
         container = QWidget()
+        container.setStyleSheet("background: transparent;")
         container_layout = QHBoxLayout(container)
         container_layout.setContentsMargins(0, 0, 0, 0)
         container_layout.setSpacing(0)
@@ -367,8 +543,11 @@ class DailyTasksWindow(QMainWindow):
         # Particle Background (behind everything)
         self.particles = ParticleBackground(container)
         self.particles.setGeometry(0, 0, 1000, 600)
-        self.particles.spawn_ambient(50)  # Initial particle count
-        self.particles.start(fps=30) # Capped at 30 FPS to reduce CPU/GPU load
+        if self.simple_mode_enabled:
+            self.particles.set_simple_mode(True)
+        else:
+            self.particles.spawn_ambient(50)  # Initial particle count
+            self.particles.start(fps=60)  # 60 FPS during active motion, auto-suspends when idle
         
         # Sidebar (semi-transparent)
         self.sidebar = Sidebar()
@@ -402,18 +581,18 @@ class DailyTasksWindow(QMainWindow):
                 background: transparent;
             }
             QScrollBar:vertical {
-                background: #2B2B2B;
-                width: 10px;
-                margin: 0px;
-                border-radius: 5px;
+                background: rgba(15, 23, 42, 120);
+                width: 8px;
+                margin: 2px;
+                border-radius: 4px;
             }
             QScrollBar::handle:vertical {
-                background: #555555;
-                min-height: 25px;
-                border-radius: 5px;
+                background: rgba(148, 163, 184, 70);
+                min-height: 28px;
+                border-radius: 4px;
             }
             QScrollBar::handle:vertical:hover {
-                background: #777777;
+                background: rgba(56, 189, 248, 160);
             }
             QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
                 height: 0px;
@@ -424,18 +603,18 @@ class DailyTasksWindow(QMainWindow):
             }
 
             QScrollBar:horizontal {
-                background: #2B2B2B;
-                height: 10px;
-                margin: 0px;
-                border-radius: 5px;
+                background: rgba(15, 23, 42, 120);
+                height: 8px;
+                margin: 2px;
+                border-radius: 4px;
             }
             QScrollBar::handle:horizontal {
-                background: #555555;
-                min-width: 25px;
-                border-radius: 5px;
+                background: rgba(148, 163, 184, 70);
+                min-width: 28px;
+                border-radius: 4px;
             }
             QScrollBar::handle:horizontal:hover {
-                background: #777777;
+                background: rgba(56, 189, 248, 160);
             }
             QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
                 width: 0px;
@@ -460,23 +639,10 @@ class DailyTasksWindow(QMainWindow):
         self.empty_state_label = QLabel("No tasks for today.\nClick '+ Add Task' to create one.")
         self.empty_state_label.setObjectName("empty_state_label")
         self.empty_state_label.setAlignment(Qt.AlignCenter)
-        self.empty_state_label.setStyleSheet("color: #888888; font-size: 16px;")
+        self.empty_state_label.setStyleSheet("color: #64748B; font-size: 16px; font-weight: 500;")
         self.empty_state_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.empty_state_label.hide()
         container_layout.addWidget(self.empty_state_label)
-        
-        # Settings Panel (overlay, initially hidden)
-        self.settings_panel = SettingsPanel(central)
-        self.settings_panel.hide()
-        self.settings_panel.close_clicked.connect(self._toggle_settings_panel)
-        self.settings_panel.dnd_toggled.connect(self._toggle_dnd)
-        self.settings_panel.prayer_mode_toggled.connect(self._toggle_prayer_mode)
-        self.settings_panel.simple_mode_toggled.connect(self._toggle_simple_mode)
-        self.settings_panel.hardcore_mode_toggled.connect(self._toggle_hardcore_mode)
-        self.settings_panel.theme_changed.connect(self._apply_theme)
-        
-        # System Tray Icon (Moved to init)
-        # self._setup_tray()
         
     def resizeEvent(self, event):
         """Handle window resize - update particle layer and grid columns"""
@@ -487,7 +653,7 @@ class DailyTasksWindow(QMainWindow):
             self.particles.setGeometry(0, 0, self.width(), self.height())
             
         # Keep settings panel anchored if visible
-        if hasattr(self, 'settings_panel') and self.settings_panel.isVisible():
+        if self._settings_panel is not None and self._settings_panel.isVisible():
             self._update_settings_pos()
             
     def _toggle_maximize_restore(self):
@@ -509,7 +675,7 @@ class DailyTasksWindow(QMainWindow):
     def showEvent(self, event):
         """Resume particle animation timer when window becomes visible"""
         if hasattr(self, 'particles') and not self.isMinimized():
-            self.particles.start(fps=30)
+            self.particles.start(fps=60)
         super().showEvent(event)
 
     def _update_resize_cursor(self, pos):
@@ -567,26 +733,79 @@ class DailyTasksWindow(QMainWindow):
 
         return edge
 
+    _FILTERED_EVENTS = frozenset((
+        QEvent.MouseMove, QEvent.Enter, QEvent.MouseButtonPress, QEvent.KeyPress, QEvent.Show
+    ))
+
     def eventFilter(self, obj, event):
-        """Handle border hover cursor and startSystemResize on mouse press"""
-        if event.type() == QEvent.MouseMove:
-            if not self.isMaximized():
-                pos = self.mapFromGlobal(QCursor.pos())
-                self._update_resize_cursor(pos)
-                if hasattr(self, 'particles'):
-                    self.particles.on_mouse_move(pos.x(), pos.y())
+        """Handle border hover cursor, system resize, and global interactive UI audio feedback"""
+        etype = event.type()
+        if etype not in self._FILTERED_EVENTS:
+            return False
 
-        elif event.type() == QEvent.MouseButtonPress and event.button() == Qt.LeftButton:
+        if etype == QEvent.MouseMove:
             if not self.isMaximized():
-                pos = self.mapFromGlobal(QCursor.pos())
-                edge = self._update_resize_cursor(pos)
-                if edge is not None:
-                    handle = self.windowHandle()
-                    if handle:
-                        handle.startSystemResize(edge)
-                        return True
+                now_t = time.perf_counter()
+                if now_t - self._last_mouse_filter_t >= 0.015:
+                    self._last_mouse_filter_t = now_t
+                    pos = self.mapFromGlobal(QCursor.pos())
+                    self._update_resize_cursor(pos)
+                    if hasattr(self, 'particles'):
+                        self.particles.on_mouse_move(pos.x(), pos.y())
 
-        return super().eventFilter(obj, event)
+        elif etype == QEvent.Enter:
+            if isinstance(obj, (QAbstractButton, QComboBox, QSlider)):
+                if obj.isEnabled():
+                    self.sound_manager.play_hover(id(obj))
+            elif isinstance(obj, (PageButton, TaskCard, InfoBadge)) or (
+                isinstance(obj, QWidget) and obj.objectName() == 'AddTaskCard'
+            ):
+                if obj.isEnabled():
+                    self.sound_manager.play_hover(id(obj))
+
+        elif etype == QEvent.MouseButtonPress:
+            btn = event.button()
+            if btn == Qt.LeftButton:
+                if not self.isMaximized():
+                    pos = self.mapFromGlobal(QCursor.pos())
+                    edge = self._update_resize_cursor(pos)
+                    if edge is not None:
+                        handle = self.windowHandle()
+                        if handle:
+                            handle.startSystemResize(edge)
+                            return True
+
+                if isinstance(obj, (QAbstractButton, QComboBox)) and obj.isEnabled():
+                    self.sound_manager.play_click()
+                elif isinstance(obj, PageButton) or (
+                    isinstance(obj, QWidget) and obj.objectName() == 'AddTaskCard'
+                ):
+                    self.sound_manager.play_click()
+                elif isinstance(obj, TaskCard) and obj.status not in ('pending', 'disabled'):
+                    self.sound_manager.play_click()
+            elif btn == Qt.RightButton:
+                if isinstance(obj, PageButton) or (
+                    isinstance(obj, TaskCard) and not obj.task_data.get('is_synced', False)
+                ):
+                    self.sound_manager.play_click()
+
+        elif etype == QEvent.KeyPress:
+            if isinstance(obj, (QLineEdit, QTextEdit, QPlainTextEdit)) and obj.isEnabled() and not obj.isReadOnly():
+                key = event.key()
+                if key not in (
+                    Qt.Key_Shift, Qt.Key_Control, Qt.Key_Alt, Qt.Key_Meta,
+                    Qt.Key_CapsLock, Qt.Key_NumLock, Qt.Key_ScrollLock,
+                    Qt.Key_Escape, Qt.Key_Tab, Qt.Key_Backtab
+                ):
+                    self.sound_manager.play_type(key)
+
+        elif etype == QEvent.Show and isinstance(obj, QMenu):
+            if not getattr(obj, '_sfx_connected', False):
+                obj._sfx_connected = True
+                obj.hovered.connect(lambda action: self.sound_manager.play_hover(id(action)))
+                obj.triggered.connect(lambda _action: self.sound_manager.play_click())
+
+        return False
             
     def mouseMoveEvent(self, event):
         """Pass mouse position to particles (Interactive Background)"""
@@ -624,8 +843,7 @@ class DailyTasksWindow(QMainWindow):
 
     def _update_window_size(self, total_cards, recenter=False):
         """Dynamically size the window (Min 3x2, Max 3x3) to prevent UI clipping"""
-        import math
-        
+
         # Lock columns to 3 for consistent width
         self.cols = 3
         
@@ -650,7 +868,7 @@ class DailyTasksWindow(QMainWindow):
         h = title_h + (rows * card_h) + ((rows - 1) * gap_h) + margins_h + bottom_safety
 
         # Enable window resizing by setting minimum size instead of hard locking fixed size
-        self.setMinimumSize(700, 500)
+        self.setMinimumSize(700, 540)
         self.setMaximumSize(16777215, 16777215)
         
         # Initial centering / sizing - Only on first load to prevent jumps when switching pages
@@ -738,36 +956,160 @@ class DailyTasksWindow(QMainWindow):
         add_card.setMinimumSize(240, 250)
         add_card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         add_card.setCursor(Qt.PointingHandCursor)
-        
-        is_light = self.current_theme == 'light'
-        add_card.setStyleSheet(f"""
-            #AddTaskCard {{
-                background-color: {'rgba(0,0,0,15)' if is_light else 'rgba(255,255,255,8)'};
-                border: 2px dashed {'#888888' if is_light else '#666666'};
-                border-radius: 12px;
-            }}
-            #AddTaskCard:hover {{
-                background-color: {'rgba(0,0,0,25)' if is_light else 'rgba(255,255,255,15)'};
-                border-color: {'#1F6AA5' if True else '#1F6AA5'};
-            }}
-        """)
+        add_card.setStyleSheet("#AddTaskCard { background: transparent; border: none; }")
+        add_card._hover_t = 0.0
+        add_card._press_t = 0.0
+        add_card._hover_anim = None
+        add_card._press_anim = None
         
         add_card_layout = QVBoxLayout(add_card)
         add_card_layout.setContentsMargins(0, 0, 0, 0)
         add_card_layout.setAlignment(Qt.AlignCenter)
         
-        plus_label = QLabel("+")
-        plus_label.setFont(QFont("Roboto", 36, QFont.Light))
-        plus_label.setStyleSheet(f"color: {'#555555' if is_light else '#888888'}; border: none;")
-        plus_label.setAlignment(Qt.AlignCenter)
+        plus_label = QLabel("")
+        plus_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        plus_label.setStyleSheet("background: transparent; border: none;")
         add_card_layout.addWidget(plus_label)
         
+        self._add_task_card = add_card
+        self._add_task_plus_label = plus_label
+        
+        def _paint_add_card(event, _w=add_card):
+            w = _w.width()
+            h = _w.height()
+            if w <= 4 or h <= 4:
+                return
+            spec = get_theme_spec(self.current_theme)
+            is_light = spec['is_light']
+            ht = float(getattr(_w, '_hover_t', 0.0))
+            pt = float(getattr(_w, '_press_t', 0.0))
+
+            def lerp_col(c1, c2, t):
+                return QColor(
+                    int(c1[0] + (c2[0] - c1[0]) * t),
+                    int(c1[1] + (c2[1] - c1[1]) * t),
+                    int(c1[2] + (c2[2] - c1[2]) * t),
+                    int(c1[3] + (c2[3] - c1[3]) * t),
+                )
+
+            r1, g1, b1, _ = spec['card_bg1']
+            r2, g2, b2, _ = spec['card_bg2']
+            rh, gh, bh, _ = spec['card_hover_bg1']
+            c_muted = QColor(spec['text_muted'])
+            c_acc = QColor(spec['accent'])
+
+            if is_light:
+                bg1 = lerp_col((r1, g1, b1, 165), (rh, gh, bh, 205), ht)
+                bg2 = lerp_col((r2, g2, b2, 180), (rh, gh, bh, 205), ht)
+                bdr = lerp_col((c_muted.red(), c_muted.green(), c_muted.blue(), 215), (c_acc.red(), c_acc.green(), c_acc.blue(), 255), ht)
+            else:
+                bg1 = lerp_col((r1, g1, b1, 105), (rh, gh, bh, 175), ht)
+                bg2 = lerp_col((r2, g2, b2, 125), (r1, g1, b1, 190), ht)
+                bdr = lerp_col((c_muted.red(), c_muted.green(), c_muted.blue(), 95), (c_acc.red(), c_acc.green(), c_acc.blue(), 245), ht)
+            plus_col = lerp_col((c_muted.red(), c_muted.green(), c_muted.blue(), 235), (c_acc.red(), c_acc.green(), c_acc.blue(), 255), ht)
+
+            mx = 5.5 - (3.0 * ht) + (3.5 * pt)
+            my_top = 5.5 - (3.0 * ht) + (3.5 * pt)
+            my_bot = 5.5 - (1.5 * ht) + (2.0 * pt)
+            rect = QRectF(mx, my_top, w - 2.0 * mx, h - my_top - my_bot)
+
+            painter = QPainter(_w)
+            painter.setRenderHint(QPainter.Antialiasing, True)
+
+            grad = QLinearGradient(rect.left(), rect.top(), rect.left(), rect.bottom())
+            grad.setColorAt(0.0, bg1)
+            grad.setColorAt(1.0, bg2)
+
+            _draw_dashed_rounded_rect(
+                painter,
+                rect,
+                16.0,
+                grad,
+                bdr,
+                pen_w=2.0,
+                target_cycle_px=15.0,
+            )
+
+            if pt > 0.01:
+                painter.setPen(Qt.NoPen)
+                painter.setBrush(QColor(0, 0, 0, int(26 * pt)))
+                painter.drawRoundedRect(rect, 16.0, 16.0)
+
+            cx = rect.center().x()
+            cy = rect.center().y()
+            arm = 14.0 + (1.0 * ht) - (1.0 * pt)
+            plus_pen = QPen(plus_col, 2.6, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
+            painter.setPen(plus_pen)
+            painter.drawLine(QPointF(cx - arm, cy), QPointF(cx + arm, cy))
+            painter.drawLine(QPointF(cx, cy - arm), QPointF(cx, cy + arm))
+            painter.end()
+
+        add_card.paintEvent = _paint_add_card
+        self._apply_add_card_theme()
+        
+        def _animate_add_card_hover(target, _w=add_card):
+            if self.simple_mode_enabled:
+                _w._hover_t = float(target)
+                _w.update()
+                return
+            if _w._hover_anim is None:
+                _w._hover_anim = QVariantAnimation(_w)
+                _w._hover_anim.setEasingCurve(QEasingCurve.OutCubic)
+                def _step(v):
+                    _w._hover_t = float(v)
+                    _w.update()
+                _w._hover_anim.valueChanged.connect(_step)
+            _w._hover_anim.stop()
+            _w._hover_anim.setDuration(145)
+            _w._hover_anim.setStartValue(float(_w._hover_t))
+            _w._hover_anim.setEndValue(float(target))
+            _w._hover_anim.start()
+
+        def _animate_add_card_press(target, duration=70, curve=QEasingCurve.OutQuad, _w=add_card):
+            if self.simple_mode_enabled:
+                _w._press_t = 0.0
+                _w.update()
+                return
+            if _w._press_anim is None:
+                _w._press_anim = QVariantAnimation(_w)
+                def _step(v):
+                    _w._press_t = float(v)
+                    _w.update()
+                _w._press_anim.valueChanged.connect(_step)
+            _w._press_anim.stop()
+            _w._press_anim.setDuration(duration)
+            _w._press_anim.setEasingCurve(curve)
+            _w._press_anim.setStartValue(float(_w._press_t))
+            _w._press_anim.setEndValue(float(target))
+            _w._press_anim.start()
+
+        def _add_card_enter(event, _w=add_card):
+            _animate_add_card_hover(1.0, _w)
+            QFrame.enterEvent(_w, event)
+
+        def _add_card_leave(event, _w=add_card):
+            _animate_add_card_hover(0.0, _w)
+            if _w._press_t > 0.0:
+                _animate_add_card_press(0.0, 135, QEasingCurve.OutCubic, _w)
+            QFrame.leaveEvent(_w, event)
+
         # BUG-12 FIX: Proper left-button check + call super() for correct Qt event propagation
         def _add_card_press(event, _widget=add_card):
             if event.button() == Qt.LeftButton:
+                _animate_add_card_press(1.0, 70, QEasingCurve.OutQuad, _widget)
                 self._open_add_dialog()
+                _animate_add_card_press(0.0, 135, QEasingCurve.OutCubic, _widget)
             QFrame.mousePressEvent(_widget, event)
+
+        def _add_card_release(event, _widget=add_card):
+            if event.button() == Qt.LeftButton and _widget._press_t > 0.0:
+                _animate_add_card_press(0.0, 135, QEasingCurve.OutCubic, _widget)
+            QFrame.mouseReleaseEvent(_widget, event)
+
+        add_card.enterEvent = _add_card_enter
+        add_card.leaveEvent = _add_card_leave
         add_card.mousePressEvent = _add_card_press
+        add_card.mouseReleaseEvent = _add_card_release
         
         total_items = len(tasks)
         add_row = total_items // self.cols
@@ -779,6 +1121,16 @@ class DailyTasksWindow(QMainWindow):
         # 1. add_task() on creation
         # 2. _update_loop() every second
         # NOT here to prevent recursion and race conditions
+
+    def _apply_add_card_theme(self):
+        """Trigger repaint of AddTaskCard when theme or hover state updates."""
+        add_card = getattr(self, '_add_task_card', None)
+        if add_card is None:
+            return
+        try:
+            add_card.update()
+        except RuntimeError:
+            pass
             
     def _on_task_clicked(self, task):
         """Handle task card click - strict state machine for status transitions.
@@ -791,33 +1143,25 @@ class DailyTasksWindow(QMainWindow):
         """
         current_status = task.get('status', 'pending')
         now = datetime.now()
-        today_str = now.strftime("%Y-%m-%d")
 
         # Ghost Check: If not scheduled for today, no action
         repeat_days = task.get('repeat_days', [0,1,2,3,4,5,6])
         if now.weekday() not in repeat_days:
             return  # Ghost task - no action
         
-        # Parse task times
-        start_str = task.get('start_time', '00:00')
-        end_str = task.get('end_time', '23:59')
-        
-        try:
-            start_dt = datetime.strptime(f"{today_str} {start_str}", "%Y-%m-%d %H:%M")
-            end_dt = datetime.strptime(f"{today_str} {end_str}", "%Y-%m-%d %H:%M")
-            
-            # Midnight handling (e.g., 23:00 to 01:00)
-            if end_dt < start_dt:
+        # Parse task times via O(1) cached integer math
+        s_secs = _parse_hhmm_to_secs(task.get('start_time', '00:00'))
+        e_secs = _parse_hhmm_to_secs(task.get('end_time', '23:59'))
+        now_secs = now.hour * 3600 + now.minute * 60 + now.second
+        if s_secs is not None and e_secs is not None:
+            if e_secs < s_secs:
                 if now.hour < 12:
-                    start_dt -= timedelta(days=1)
+                    s_secs -= 86400
                 else:
-                    end_dt += timedelta(days=1)
-        except ValueError:
-            start_dt = now
-            end_dt = now
-        
-        # Determine time state
-        is_within_time = start_dt <= now <= end_dt
+                    e_secs += 86400
+            is_within_time = s_secs <= now_secs <= e_secs
+        else:
+            is_within_time = True
         
         # === STATE MACHINE TRANSITIONS ===
         new_status = None
@@ -846,7 +1190,7 @@ class DailyTasksWindow(QMainWindow):
         if new_status is None:
             return
         
-        # Play sound for completing task
+        # Play sound for completing or undoing task
         if new_status == 'done':
             self.sound_manager.play_done()
             
@@ -856,6 +1200,8 @@ class DailyTasksWindow(QMainWindow):
                 if card:
                     pos = card.mapTo(self, card.rect().center())
                     self.particles.burst_confetti(pos.x(), pos.y())
+        elif current_status == 'done' and new_status in ('active', 'failed'):
+            self.sound_manager.play_undo()
         
         # Update task status
         self.task_manager.update_task_status(task['id'], new_status)
@@ -866,11 +1212,10 @@ class DailyTasksWindow(QMainWindow):
             self.task_cards[task['id']].update_task(task)
             
         self._update_app_icon()
-        # Removed _force_refresh_next_tick=True because we just updated the card in-place. 
-        # Forcing a full UI rebuild (destroying and recreating all widgets) causes a frame drop right as confetti starts.
             
     def _open_add_dialog(self):
         """Open dialog to add new task"""
+        dialog = None
         try:
             dialog = AddTaskDialog(self, icon_categories=ICON_CATEGORIES)
             if hasattr(dialog, 'apply_theme'):
@@ -891,6 +1236,9 @@ class DailyTasksWindow(QMainWindow):
             ModernDialogs.show_message(self, "Error", f"Failed to open Add Task dialog:\n{str(e)}", theme=self.current_theme)
             import traceback
             traceback.print_exc()
+        finally:
+            if dialog is not None:
+                dialog.deleteLater()
 
     # BUG-05 FIX: ID-based dispatch methods — always re-fetch from task_manager so the
     # captured reference is never stale even after _load_tasks re-creates task dicts.
@@ -920,6 +1268,8 @@ class DailyTasksWindow(QMainWindow):
     
     def _on_page_selected(self, page_id):
         """Switch to a different page"""
+        if page_id != self.active_page_id:
+            self.sound_manager.play_click()
         self.active_page_id = page_id
         self.sidebar.set_active_page(page_id)
         self._load_tasks()
@@ -927,31 +1277,55 @@ class DailyTasksWindow(QMainWindow):
     
     def _on_page_add(self):
         """Show dialog to create new page or import a share ID"""
-        from PySide6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton, QStackedWidget, QWidget, QTextEdit
+        from PySide6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QStackedWidget, QWidget, QTextEdit
+        from src.qt_components import AnimatedPushButton as QPushButton
         
+        spec = get_theme_spec(self.current_theme)
+        is_light = spec['is_light']
+        ar, ag, ab = spec['accent_rgb']
+        rh, gh, bh, ha = spec['card_hover_bg1']
         # Custom dialog with Name + Import option
         dialog = QDialog(self)
+        dialog.current_theme = self.current_theme
         dialog.setWindowTitle("New Page")
         dialog.setFixedSize(360, 220)
+        dialog.setAttribute(Qt.WA_StyledBackground, True)
+        dialog.setAutoFillBackground(True)
+        pal = dialog.palette()
+        pal.setColor(dialog.backgroundRole(), QColor(spec['dialog_bg']))
+        pal.setColor(dialog.foregroundRole(), QColor(spec['text_main']))
+        dialog.setPalette(pal)
+        dialog.ensurePolished()
         dialog.setStyleSheet(f"""
             QDialog {{
-                background-color: {'#F5F5F5' if self.current_theme == 'light' else '#2B2B2B'};
-                color: {'#333' if self.current_theme == 'light' else 'white'};
+                background-color: {spec['dialog_bg']};
+                color: {spec['text_main']};
+            }}
+            QLabel {{
+                color: {spec['text_main']};
+                background: transparent;
             }}
             QLineEdit, QTextEdit {{
-                background-color: {'white' if self.current_theme == 'light' else '#3B3B3B'};
-                color: {'#333' if self.current_theme == 'light' else 'white'};
-                border: 1px solid {'#CCC' if self.current_theme == 'light' else '#555'};
-                border-radius: 6px;
-                padding: 8px;
+                background-color: {spec['input_bg']};
+                color: {spec['text_main']};
+                border: 1px solid {spec['input_border']};
+                border-radius: 8px;
+                padding: 8px 10px;
                 font-size: 13px;
+            }}
+            QLineEdit:focus, QTextEdit:focus {{
+                border: 1px solid {spec['accent']};
             }}
             QPushButton {{
                 padding: 8px 16px;
-                border-radius: 6px;
+                border-radius: 8px;
                 font-size: 12px;
+                font-weight: 600;
             }}
         """)
+        dialog.style().unpolish(dialog)
+        dialog.style().polish(dialog)
+        apply_window_theme_frame(dialog, self.current_theme)
         
         layout = QVBoxLayout(dialog)
         layout.setSpacing(0)
@@ -967,7 +1341,7 @@ class DailyTasksWindow(QMainWindow):
         p1_layout.setSpacing(12)
         
         name_label = QLabel("Page Name:")
-        name_label.setFont(QFont("Roboto", 10))
+        name_label.setFont(QFont("Segoe UI", 10, QFont.DemiBold))
         p1_layout.addWidget(name_label)
         
         name_input = QLineEdit()
@@ -982,28 +1356,34 @@ class DailyTasksWindow(QMainWindow):
         import_btn = QPushButton("Import")
         create_btn = QPushButton("Create")
         
-        primary_btn_style = """
-            QPushButton {
-                background-color: #1F6AA5;
-                color: white;
-                border: none;
-            }
-            QPushButton:hover {
-                background-color: #2980B9;
-            }
-            QPushButton:disabled {
-                background-color: #1F6AA5;
-                color: rgba(255, 255, 255, 0.4);
-            }
-        """
-        secondary_btn_style = f"""
+        primary_btn_style = f"""
             QPushButton {{
-                background-color: {'#E0E0E0' if self.current_theme == 'light' else '#3B3B3B'};
-                color: {'#555' if self.current_theme == 'light' else '#AAA'};
-                border: none;
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 {spec['accent_primary']}, stop:1 {spec['accent_hover']});
+                color: #FFFFFF;
+                border: 1px solid rgba({ar}, {ag}, {ab}, 95);
             }}
             QPushButton:hover {{
-                background-color: {'#D0D0D0' if self.current_theme == 'light' else '#4B4B4B'};
+                background: {spec['accent_hover']};
+                border: 1px solid {spec['accent']};
+            }}
+            QPushButton:disabled {{
+                background-color: {'#E2E8F0' if is_light else spec['input_bg']};
+                color: {spec['text_muted']};
+                border: 1px solid {spec['input_border']};
+            }}
+        """
+        sec_bg = "#E2E8F0" if is_light else spec['input_bg']
+        sec_fg = spec['text_main'] if is_light else spec['text_muted']
+        sec_hover = "#CBD5E1" if is_light else f"rgba({rh}, {gh}, {bh}, {ha})"
+        secondary_btn_style = f"""
+            QPushButton {{
+                background-color: {sec_bg};
+                color: {sec_fg};
+                border: 1px solid {spec['input_border']};
+            }}
+            QPushButton:hover {{
+                background-color: {sec_hover};
+                color: {spec['text_main']};
             }}
         """
         cancel_btn.setStyleSheet(secondary_btn_style)
@@ -1053,7 +1433,7 @@ class DailyTasksWindow(QMainWindow):
         p2_layout.setSpacing(12)
         
         import_label = QLabel("Paste Shared ID:")
-        import_label.setFont(QFont("Roboto", 10))
+        import_label.setFont(QFont("Segoe UI", 10, QFont.DemiBold))
         p2_layout.addWidget(import_label)
         
         import_input = QTextEdit()
@@ -1097,13 +1477,16 @@ class DailyTasksWindow(QMainWindow):
         name_input.returnPressed.connect(lambda: attempt_create() if create_btn.isEnabled() else None)
         do_import_btn.clicked.connect(attempt_import)
         
-        if dialog.exec() != QDialog.Accepted:
+        accepted = (dialog.exec() == QDialog.Accepted)
+        share_id_text = import_input.toPlainText().strip()
+        page_name = name_input.text().strip()
+        dialog.deleteLater()
+        if not accepted:
             return
             
         action = result_state["action"]
         
         if action == "import":
-            share_id_text = import_input.toPlainText().strip()
             try:
                 decoded_page_name, tasks = share_handler.decode_tasks(share_id_text)
                 if not tasks:
@@ -1121,7 +1504,6 @@ class DailyTasksWindow(QMainWindow):
                 ModernDialogs.show_message(self, "Import Error", f"Failed to import: {e}", theme=self.current_theme)
                 
         elif action == "create":
-            page_name = name_input.text().strip()
             page = self.task_manager.add_page(page_name)
             self.active_page_id = page['id']
             self._refresh_page_list()
@@ -1209,13 +1591,16 @@ class DailyTasksWindow(QMainWindow):
             QApplication.clipboard().setText(share_id)
             self.sidebar.show_copy_feedback(page_id)
             
-            if HAS_PLYER:
+            try:
+                from plyer import notification
                 notification.notify(
                     title="Daily Tasks",
                     message=f"Share ID for '{page_name}' copied!",
                     app_name="Daily Tasks",
                     timeout=3
                 )
+            except Exception:
+                pass
         except Exception as e:
             ModernDialogs.show_message(self, "Export Error", f"Failed to encode: {e}", theme=self.current_theme)
     
@@ -1227,16 +1612,20 @@ class DailyTasksWindow(QMainWindow):
             
     def _edit_task(self, task):
         """Open dialog to edit task"""
-        dialog = AddTaskDialog(self, task_data=task, icon_categories=ICON_CATEGORIES)
-        result = dialog.exec()
-        if result == 1:  # Accepted (Save)
-            data = dialog.get_task_data()
-            self._on_task_save(
-                data['name'], data['start_time'], data['end_time'], 
-                data.get('repeat_days'), data.get('image_path'), task['id']
-            )
-        elif result == 2:  # Delete
-            self._delete_task(task)
+        dialog = AddTaskDialog(self, task_data=task, icon_categories=ICON_CATEGORIES, theme=self.current_theme)
+        dialog.apply_theme(self.current_theme)
+        try:
+            result = dialog.exec()
+            if result == 1:  # Accepted (Save)
+                data = dialog.get_task_data()
+                self._on_task_save(
+                    data['name'], data['start_time'], data['end_time'], 
+                    data.get('repeat_days'), data.get('image_path'), task['id']
+                )
+            elif result == 2:  # Delete
+                self._delete_task(task)
+        finally:
+            dialog.deleteLater()
             
     def _delete_task(self, task):
         """Handle task deletion"""
@@ -1269,31 +1658,73 @@ class DailyTasksWindow(QMainWindow):
         
     def _toggle_dnd(self, enabled):
         """Toggle Do Not Disturb mode"""
-        self.dnd_enabled = enabled
-        self.sound_manager.set_dnd(enabled)
+        self.dnd_enabled = bool(enabled)
+        self.sound_manager.set_dnd(self.dnd_enabled)
         
-        if enabled:
+        if self.dnd_enabled:
             self._stop_flashing()
+
+        if self._settings_panel is not None:
+            cb = self._settings_panel.dnd_checkbox.checkbox
+            if cb.isChecked() != self.dnd_enabled:
+                cb.blockSignals(True)
+                cb.setChecked(self.dnd_enabled)
+                cb.blockSignals(False)
+                self._settings_panel._update_checkbox_visual(cb, self.dnd_enabled)
+            self._settings_panel._update_volume_visibility(animate=self._settings_panel.isVisible())
             
         self._update_app_icon()
         self.save_settings()
+
+    def _toggle_ui_sounds(self, enabled):
+        """Toggle interactive UI sound effects (hover, click, typing) independently of task alerts."""
+        self.ui_sounds_enabled = bool(enabled)
+        self.sound_manager.set_ui_sounds_enabled(self.ui_sounds_enabled)
+        if self.ui_sounds_enabled:
+            self.sound_manager.play_click()
+        if self._settings_panel is not None:
+            cb = self._settings_panel.ui_sounds_checkbox.checkbox
+            if cb.isChecked() != self.ui_sounds_enabled:
+                cb.blockSignals(True)
+                cb.setChecked(self.ui_sounds_enabled)
+                cb.blockSignals(False)
+                self._settings_panel._update_checkbox_visual(cb, self.ui_sounds_enabled)
+            self._settings_panel._update_volume_visibility(animate=self._settings_panel.isVisible())
+        self.save_settings()
+
+    def _on_ui_volume_changed(self, volume):
+        """Adjust interactive UI sound volume (0-100%) independently of task alerts."""
+        self.ui_volume = max(0, min(100, int(volume)))
+        self.sound_manager.set_ui_volume(self.ui_volume)
+        if not hasattr(self, '_vol_save_timer') or self._vol_save_timer is None:
+            self._vol_save_timer = QTimer(self)
+            self._vol_save_timer.setSingleShot(True)
+            self._vol_save_timer.timeout.connect(self.save_settings)
+        self._vol_save_timer.start(250)
         
+    def _sync_prayers_background(self, silent=False):
+        """Synchronize prayer times in a background worker thread."""
+        self._silent_prayer_sync = silent
+        self._prayer_loading = True
+        if self._settings_panel is not None:
+            self._settings_panel.set_prayer_loading(True)
+
+        def sync():
+            try:
+                success = self.task_manager.sync_prayer_times()
+                self.prayer_sync_finished.emit(success)
+            except Exception as e:
+                print(f"Prayer sync failed: {e}")
+                self.prayer_sync_finished.emit(False)
+
+        threading.Thread(target=sync, daemon=True).start()
+
     def _toggle_prayer_mode(self, enabled):
         """Toggle prayer times feature"""
+        self.prayer_mode_enabled = enabled
         if enabled:
-            # Sync prayer times
-            self.settings_panel.set_prayer_loading(True)
             self.save_settings()
-            
-            def sync():
-                try:
-                    success = self.task_manager.sync_prayer_times()
-                    self.prayer_sync_finished.emit(success)
-                except Exception as e:
-                    print(f"Prayer sync failed: {e}")
-                    self.prayer_sync_finished.emit(False)
-                    
-            threading.Thread(target=sync, daemon=True).start()
+            self._sync_prayers_background(silent=False)
         else:
             try:
                 # Remove synced tasks
@@ -1307,31 +1738,33 @@ class DailyTasksWindow(QMainWindow):
             
     def _post_prayer_sync(self, success):
         """Handle prayer sync completion"""
-        self.settings_panel.set_prayer_loading(False)
+        self._prayer_loading = False
+        if self._settings_panel is not None:
+            self._settings_panel.set_prayer_loading(False)
+            self.prayer_mode_enabled = self._settings_panel.prayer_checkbox.checkbox.isChecked()
         
+        silent = getattr(self, '_silent_prayer_sync', False)
+        self._silent_prayer_sync = False
+
         # Check if user disabled it while we were syncing
-        if not self.settings_panel.prayer_checkbox.checkbox.isChecked():
-            # Ensure they are gone (in case sync re-added them)
+        if not self.prayer_mode_enabled:
             self.task_manager.remove_synced_tasks()
             self._load_tasks()
             return
             
         if success:
-            # Sync succeeded! Recalculate statuses (Pending/Active) and show them
-            self.task_manager.synchronize_task_statuses()
-            self._load_tasks()
-            # Show a subtle success if it was the first time
-            if not getattr(self, '_prayer_synced_once', False):
+            changed = getattr(self.task_manager, 'last_prayer_sync_changed', True)
+            if changed or not silent:
+                self.task_manager.synchronize_task_statuses()
+                self._load_tasks()
+            if not silent and not getattr(self, '_prayer_synced_once', False):
                 self._send_notification("Daily Tasks", "Prayer Timers synced successfully!")
-                self._prayer_synced_once = True
+            self._prayer_synced_once = True
         else:
-            # Sync failed (Network or Location issue)
-            # DO NOT uncheck the box - let the user keep the intent enabled
-            # The TaskManager will use it's fallback/cached data if available
-            self._send_notification("Sync Issue", "Could not update prayer times. Using cached data.")
-            # Still refresh UI in case cached ones can now be shown
-            self.task_manager.synchronize_task_statuses()
-            self._load_tasks()
+            if not silent:
+                self._send_notification("Sync Issue", "Could not update prayer times. Using cached data.")
+                self.task_manager.synchronize_task_statuses()
+                self._load_tasks()
         
     def _toggle_simple_mode(self, enabled):
         """Toggle simple mode (disable particles and animations)"""
@@ -1372,6 +1805,7 @@ class DailyTasksWindow(QMainWindow):
                 self.sound_manager.play_fail()
 
         # 2. Scan current monitoring tasks for active/urgent state (read-only)
+        now_secs = now.hour * 3600 + now.minute * 60 + now.second
         for task in self.task_manager.get_tasks_for_monitoring():
             if not task.get('enabled', True):
                 continue
@@ -1387,18 +1821,17 @@ class DailyTasksWindow(QMainWindow):
 
             has_active = True
 
-            try:
-                start_dt = datetime.combine(now.date(), datetime.strptime(task['start_time'], "%H:%M").time())
-                end_dt = datetime.combine(now.date(), datetime.strptime(task['end_time'], "%H:%M").time())
-                # OPT-10 / shared midnight handling
-                if end_dt < start_dt:
+            s_secs = _parse_hhmm_to_secs(task.get('start_time', ''))
+            e_secs = _parse_hhmm_to_secs(task.get('end_time', ''))
+            if s_secs is not None and e_secs is not None:
+                if e_secs < s_secs:
                     if now.hour < 12:
-                        start_dt -= timedelta(days=1)
+                        s_secs -= 86400
                     else:
-                        end_dt += timedelta(days=1)
+                        e_secs += 86400
 
-                remaining = end_dt - now
-                if timedelta(seconds=0) < remaining < timedelta(minutes=30):
+                rem_secs = e_secs - now_secs
+                if 0 < rem_secs < 1800:
                     has_urgent = True
                     if tid in self.task_cards:
                         self.task_cards[tid].start_urgent_flashing()
@@ -1410,8 +1843,6 @@ class DailyTasksWindow(QMainWindow):
                     if tid in self.task_cards:
                         self.task_cards[tid].stop_flashing()
                         self.task_cards[tid].start_active_pulse()
-            except (ValueError, KeyError):
-                pass
 
         # 3. Batch flash logic: flash once when first active task appears
         if has_active:
@@ -1484,16 +1915,16 @@ class DailyTasksWindow(QMainWindow):
         # Flash taskbar
         self._flash_window()
         
-        if HAS_PLYER:
-            try:
-                notification.notify(
-                    title=title,
-                    message=message,
-                    app_name="Daily Tasks",
-                    timeout=10
-                )
-            except Exception as e:
-                print(f"Notification failed: {e}")
+        try:
+            from plyer import notification
+            notification.notify(
+                title=title,
+                message=message,
+                app_name="Daily Tasks",
+                timeout=10
+            )
+        except Exception as e:
+            print(f"Notification failed: {e}")
                 
     def _flash_window(self):
         """Flash window in taskbar (Continuous until focused)"""
@@ -1537,7 +1968,7 @@ class DailyTasksWindow(QMainWindow):
                 self._has_flashed_batch = True
                 # Restart particles on focus
                 if hasattr(self, 'particles'):
-                    self.particles.start(fps=30)
+                    self.particles.start(fps=60)
             else:
                 # OPTIMIZATION: Stop particles completely when window is unfocused (clicking elsewhere)
                 if hasattr(self, 'particles'):
@@ -1554,7 +1985,7 @@ class DailyTasksWindow(QMainWindow):
                 # Restart particles when restored
                 if hasattr(self, 'particles'):
                     # Only restart if not already running (start() handles restart safely)
-                    self.particles.start(fps=30)
+                    self.particles.start(fps=60)
         super().changeEvent(event)
             
     def _update_app_icon(self):
@@ -1565,75 +1996,70 @@ class DailyTasksWindow(QMainWindow):
         QTimer.singleShot(200, self._perform_icon_update)
         
     def _perform_icon_update(self):
-        """Actually update the app icon"""
+        """Actually update the app icon using cached 128x128 pixmap and badge cache"""
         self._icon_update_scheduled = False
         
         try:
-            if not os.path.exists(self.icon_path):
+            base_pix = self._get_base_icon_pixmap()
+            if base_pix.isNull():
                 return
                 
             # Count active tasks
-            # Count active tasks
             active_count = 0
             now = datetime.now()
+            weekday = now.weekday()
             if not self.dnd_enabled:
                 for t in self.task_manager.get_tasks_for_monitoring():
                     # Skip Ghost Tasks
-                    if now.weekday() not in t.get('repeat_days', [0,1,2,3,4,5,6]):
+                    if weekday not in t.get('repeat_days', [0,1,2,3,4,5,6]):
                         continue
                         
                     if t.get('status') == 'active':
                         active_count += 1
                         
-            # BUG-14 / OPT-02 FIX: Restored early-exit guard — skip full icon
-            # rebuild when active count and DND state haven't changed.
-            # Previously commented out; re-enabled to avoid 5 QPainter renders/second.
             cache_key = (active_count, self.dnd_enabled)
             if getattr(self, '_last_badge_cache_key', None) == cache_key:
                 return
             self._last_badge_cache_key = cache_key
             self.last_badge_count = active_count
-            
-            # Load base icon via Qt natively
-            pixmap = QPixmap(self.icon_path)
-            
+
             if active_count > 0:
-                # Use hardware-accelerated QPainter instead of slow PIL
-                painter = QPainter(pixmap)
-                painter.setRenderHint(QPainter.Antialiasing)
-                
-                w = pixmap.width()
-                h = pixmap.height()
-                badge_size = int(w * 0.45)
-                x0 = w - badge_size
-                y0 = h - badge_size
-                
-                # Draw red circle
-                painter.setBrush(QColor("#D32F2F"))
-                painter.setPen(QPen(Qt.white, int(w*0.02)))
-                painter.drawEllipse(x0, y0, badge_size, badge_size)
-                
-                # Draw text
-                painter.setPen(Qt.white)
-                font = QFont("Arial", int(badge_size * 0.55), QFont.Bold)
-                painter.setFont(font)
-                
-                from PySide6.QtCore import QRectF
-                painter.drawText(QRectF(x0, y0, badge_size, badge_size), Qt.AlignCenter, str(active_count))
-                painter.end()
-                        
-                # Update Window Title with Count
                 self.setWindowTitle(f"({active_count}) Daily Tasks (V2.5 - New Engine)")
             else:
                 self.setWindowTitle("Daily Tasks (V2.5 - New Engine)")
-        
-            icon = QIcon(pixmap)
+
+            icon = self._badge_icon_cache.get(cache_key)
+            if icon is None:
+                if active_count > 0:
+                    pixmap = base_pix.copy()
+                    painter = QPainter(pixmap)
+                    painter.setRenderHint(QPainter.Antialiasing)
+                    
+                    w = pixmap.width()
+                    h = pixmap.height()
+                    badge_size = int(w * 0.45)
+                    x0 = w - badge_size
+                    y0 = h - badge_size
+                    
+                    painter.setBrush(QColor("#D32F2F"))
+                    painter.setPen(QPen(Qt.white, max(1, int(w * 0.02))))
+                    painter.drawEllipse(x0, y0, badge_size, badge_size)
+                    
+                    painter.setPen(Qt.white)
+                    font = QFont("Arial", int(badge_size * 0.55), QFont.Bold)
+                    painter.setFont(font)
+                    painter.drawText(QRectF(x0, y0, badge_size, badge_size), Qt.AlignCenter, str(active_count))
+                    painter.end()
+                    icon = QIcon(pixmap)
+                else:
+                    icon = QIcon(base_pix)
+                if len(self._badge_icon_cache) >= 16:
+                    self._badge_icon_cache.clear()
+                self._badge_icon_cache[cache_key] = icon
             
             self.setWindowIcon(icon)
-            # Force update Taskbar icon via QApplication
             QApplication.instance().setWindowIcon(icon)
             
-            # Update tray icon too
             if self.tray_icon:
                 self.tray_icon.setIcon(icon)
                 self.tray_icon.setToolTip(f"Daily Tasks ({active_count} active)" if active_count > 0 else "Daily Tasks")
@@ -1643,7 +2069,6 @@ class DailyTasksWindow(QMainWindow):
             
     def load_settings(self):
         """Load user preferences"""
-        # Use AppData for persistent storage (not MEIPASS which is a temp dir)
         appdata = os.environ.get('APPDATA', os.path.expanduser('~'))
         self.settings_dir = os.path.join(appdata, 'DailyTasks')
         self.settings_path = os.path.join(self.settings_dir, "settings.json")
@@ -1652,45 +2077,46 @@ class DailyTasksWindow(QMainWindow):
             with open(self.settings_path, 'r') as f:
                 settings = json.load(f)
                 
-            # Apply settings to panel checkboxes (block signals to prevent triggering during load)
             dnd = settings.get('dnd_enabled', False)
             prayer = settings.get('prayer_mode_enabled', False)
             simple = settings.get('simple_mode_enabled', False)
             hardcore = settings.get('hardcore_mode_enabled', False)
+            ui_sounds = settings.get('ui_sounds_enabled', True)
+            ui_vol = int(settings.get('ui_volume', 80))
             theme = settings.get('theme', 'dark')
             
-            # Set theme toggle
-            self.settings_panel._set_theme(theme)
+            self.dnd_enabled = dnd
+            self.prayer_mode_enabled = prayer
+            self.simple_mode_enabled = simple
+            self.hardcore_mode_enabled = hardcore
+            self.ui_sounds_enabled = ui_sounds
+            self.ui_volume = ui_vol
             self.current_theme = theme
-            self._apply_theme(theme)
+            self.sound_manager.set_ui_sounds_enabled(ui_sounds)
+            self.sound_manager.set_ui_volume(ui_vol)
+
+            if self._settings_panel is not None:
+                self._settings_panel._set_theme(theme)
+                self._settings_panel.set_values(dnd, prayer, simple, hardcore, ui_sounds, ui_vol)
+            self._apply_theme(theme, save=False)
             
-            # Set checkbox states
-            self.settings_panel.set_values(dnd, prayer, simple, hardcore)
-            
-            # Store initial scroll position to be applied after tasks load
             self._initial_scroll_pos = settings.get('scroll_position', 0)
             
-            # Restore active page
             saved_page = settings.get('active_page_id')
             if saved_page and self.task_manager._find_page(saved_page):
                 self.active_page_id = saved_page
             
-            # Check for date change (Reset Logic for persistent tasks)
             today_str = datetime.now().strftime("%Y-%m-%d")
             last_date = settings.get('last_opened_date', today_str) 
             
-            # If we opened on a new day, reset tasks
             if last_date != today_str:
-                print(f"New day detected ({last_date} -> {today_str}). Resetting daily tasks.")
                 self.task_manager.reset_daily_tasks()
                 
-            # Always sync statuses to handle time passed while closed
             self.task_manager.synchronize_task_statuses()
                 
             self._last_opened_date = today_str
-            self.save_settings()  # Important: Persist "last opened" immediately to prevent accidental resets on crash
+            self.save_settings()
             
-            # Apply actual logic
             if dnd:
                 self._toggle_dnd(True)
             if simple:
@@ -1711,75 +2137,80 @@ class DailyTasksWindow(QMainWindow):
         try:
             if not hasattr(self, 'sidebar') or not hasattr(self.sidebar, 'settings_btn'):
                 return
+            panel = self._ensure_settings_panel()
                 
             # 1. Get Button's Global Position
             btn_global = self.sidebar.settings_btn.mapToGlobal(QPoint(0, 0))
             
             # 2. Convert to Panel's Parent Coordinates (central widget)
-            # This ensures 'move(x,y)' works correctly regardless of window nesting/margins
-            parent = self.settings_panel.parent()
+            parent = panel.parent()
             if not parent:
                 parent = self # Fallback
                 
             target_pos = parent.mapFromGlobal(btn_global)
             
-            # 3. Calculate Target X,Y
-            # Left aligned with button, slightly offset
+            # 3. Calculate Target X,Y (anchor top edge using expanded reference height so items never shift)
+            ref_h = getattr(panel, '_EXPANDED_HEIGHT', panel.height())
             x = target_pos.x() + 10
-            
-            # Bottom aligned with button top
-            y = target_pos.y() - self.settings_panel.height() - 10
+            y = target_pos.y() - ref_h - 10
             
             # 4. Clamp to safe area (Title bar ~40px)
             if y < 40: y = 40
             
-            self.settings_panel.move(x, y)
+            panel.move(x, y)
         except Exception as e:
             print(f"Error positioning settings: {e}")
-            # Fallback to center if positioning fails
-            x = (self.width() - self.settings_panel.width()) // 2
-            y = (self.height() - self.settings_panel.height()) // 2
-            self.settings_panel.move(x, y)
+            panel = self._ensure_settings_panel()
+            x = (self.width() - panel.width()) // 2
+            y = (self.height() - panel.height()) // 2
+            panel.move(x, y)
 
     def _toggle_settings_panel(self):
         """Show/hide settings panel"""
-        if self.settings_panel.isVisible():
-            self.settings_panel.hide()
+        panel = self._ensure_settings_panel()
+        if panel.isVisible():
+            panel.hide()
         else:
             self._update_settings_pos()
-            self.settings_panel.show()
-            self.settings_panel.raise_()
+            panel.show()
+            panel.raise_()
             
-    def _apply_theme(self, theme):
-        """Apply theme globally"""
-        self.current_theme = theme
-        self.save_settings()
+    def _apply_theme(self, theme, save=True):
+        """Apply theme globally across all 10 themes"""
+        spec = get_theme_spec(theme)
+        ar, ag, ab = spec['accent_rgb']
+        self.current_theme = theme if theme in dict(THEME_OPTIONS) else "dark"
+        if save:
+            self.save_settings()
         
-        if theme == "light":
-            # Light theme colors
-            bg_color = "#FAFAFA"
-            scroll_bg = "#2B2B2B"
-            scroll_handle = "#888888"
-            QApplication.instance().setStyleSheet(LIGHT_THEME_CSS)
+        bg_gradient = spec['window_bg']
+        if spec['is_light']:
+            scroll_bg = "rgba(148, 163, 184, 90)"
+            scroll_handle = f"rgba({ar}, {ag}, {ab}, 135)"
+            scroll_hover = spec['accent']
         else:
-            # Dark theme colors (default)
-            bg_color = "#2B2B2B"
-            scroll_bg = "#2B2B2B"
-            scroll_handle = "#555555"
-            QApplication.instance().setStyleSheet(DARK_THEME_CSS)
+            scroll_bg = "rgba(0, 0, 0, 115)"
+            scroll_handle = f"rgba({ar}, {ag}, {ab}, 95)"
+            scroll_hover = spec['accent']
+        QApplication.instance().setStyleSheet(_build_global_theme_css(spec))
             
         # Update central widget
         self.centralWidget().setStyleSheet(f"""
             #CentralWidget {{
-                background-color: {bg_color};
+                background: {bg_gradient};
             }}
         """)
         
-        # Update sidebar
-        self.sidebar.apply_theme(theme)
-        self.settings_panel.apply_theme(theme)
+        # Update particles for theme contrast
+        if hasattr(self, 'particles') and self.particles is not None:
+            self.particles.set_theme(self.current_theme)
         
-        # Update scroll area for light mode
+        # Update sidebar
+        self.sidebar.apply_theme(self.current_theme)
+        if self._settings_panel is not None:
+            self._settings_panel.apply_theme(self.current_theme)
+        
+        # Update scroll area
         self.scroll.setStyleSheet(f"""
             QScrollArea {{
                 background: transparent;
@@ -1790,21 +2221,55 @@ class DailyTasksWindow(QMainWindow):
             }}
             QScrollBar:vertical {{
                 background: {scroll_bg};
-                width: 10px;
-                border-radius: 5px;
+                width: 8px;
+                margin: 2px;
+                border-radius: 4px;
             }}
             QScrollBar::handle:vertical {{
                 background: {scroll_handle};
-                border-radius: 5px;
+                min-height: 28px;
+                border-radius: 4px;
+            }}
+            QScrollBar::handle:vertical:hover {{
+                background: {scroll_hover};
+            }}
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
+                height: 0px;
+                background: transparent;
+            }}
+            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{
+                background: transparent;
+            }}
+            QScrollBar:horizontal {{
+                background: {scroll_bg};
+                height: 8px;
+                margin: 2px;
+                border-radius: 4px;
+            }}
+            QScrollBar::handle:horizontal {{
+                background: {scroll_handle};
+                min-width: 28px;
+                border-radius: 4px;
+            }}
+            QScrollBar::handle:horizontal:hover {{
+                background: {scroll_hover};
+            }}
+            QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{
+                width: 0px;
+                background: transparent;
+            }}
+            QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {{
+                background: transparent;
             }}
         """)
         
-        # Update task cards
+        # Update task cards and (+) add card
         for card in self.task_cards.values():
-            card.apply_theme(theme)
+            card.apply_theme(self.current_theme)
+        self._apply_add_card_theme()
         
         # Update title bar
-        self.title_bar.apply_theme(theme)
+        self.title_bar.apply_theme(self.current_theme)
 
     def _ensure_startup(self):
         """Enforce startup registry key"""
@@ -1836,12 +2301,19 @@ class DailyTasksWindow(QMainWindow):
             return
 
         try:
+            prayer_enabled = (
+                self._settings_panel.prayer_checkbox.checkbox.isChecked()
+                if self._settings_panel is not None
+                else self.prayer_mode_enabled
+            )
             # Gather all values on the main thread (UI access must stay on main thread)
             settings = {
                 'dnd_enabled': self.dnd_enabled,
                 'simple_mode_enabled': self.simple_mode_enabled,
-                'prayer_mode_enabled': self.settings_panel.prayer_checkbox.checkbox.isChecked(),
+                'prayer_mode_enabled': prayer_enabled,
                 'hardcore_mode_enabled': self.hardcore_mode_enabled,
+                'ui_sounds_enabled': getattr(self, 'ui_sounds_enabled', True),
+                'ui_volume': getattr(self, 'ui_volume', 80),
                 'theme': self.current_theme,
                 'scroll_position': self.scroll.verticalScrollBar().value(),
                 'last_opened_date': getattr(self, '_last_opened_date', datetime.now().strftime("%Y-%m-%d")),
@@ -1855,7 +2327,7 @@ class DailyTasksWindow(QMainWindow):
                 try:
                     os.makedirs(settings_dir, exist_ok=True)
                     with open(settings_path, 'w') as f:
-                        json.dump(settings, f)
+                        json.dump(settings, f, separators=(',', ':'))
                 except Exception as e:
                     print(f"Failed to save settings: {e}")
 
@@ -1867,9 +2339,10 @@ class DailyTasksWindow(QMainWindow):
         """Setup system tray icon"""
         self.tray_icon = QSystemTrayIcon(self)
         
-        # Set tray icon
-        if os.path.exists(self.icon_path):
-            self.tray_icon.setIcon(QIcon(self.icon_path))
+        # Set tray icon from cached 128x128 pixmap
+        base_pix = self._get_base_icon_pixmap()
+        if not base_pix.isNull():
+            self.tray_icon.setIcon(self.windowIcon() if not self.windowIcon().isNull() else QIcon(base_pix))
         else:
             self.tray_icon.setIcon(self.style().standardIcon(self.style().SP_ComputerIcon))
         
@@ -1887,18 +2360,23 @@ class DailyTasksWindow(QMainWindow):
         tray_menu.addAction(quit_action)
         
         # Style the menu manually to match app
-        tray_menu.setStyleSheet("""
-            QMenu {
-                background-color: #2B2B2B;
-                color: white;
-                border: 1px solid #555;
-            }
-            QMenu::item {
-                padding: 5px 20px;
-            }
-            QMenu::item:selected {
-                background-color: #1F6AA5;
-            }
+        spec = get_theme_spec(self.current_theme)
+        tray_menu.setStyleSheet(f"""
+            QMenu {{
+                background-color: {spec['dialog_bg']};
+                color: {spec['text_main']};
+                border: 1px solid {spec['input_border']};
+                border-radius: 8px;
+                padding: 4px;
+            }}
+            QMenu::item {{
+                padding: 6px 22px;
+                border-radius: 6px;
+            }}
+            QMenu::item:selected {{
+                background-color: {spec['accent_primary']};
+                color: #FFFFFF;
+            }}
         """)
         
         self.tray_menu = tray_menu
@@ -1946,13 +2424,40 @@ class DailyTasksWindow(QMainWindow):
 
 
     def _restore_window(self):
-        """Robust restore from tray"""
+        """Robust restore from tray with Win32 foreground enforcement"""
         if self.isMinimized():
             self.showNormal()
         else:
             self.show()
         
-        self.setWindowState(self.windowState() & ~Qt.WindowMinimized | Qt.WindowActive)
+        self.setWindowState((self.windowState() & ~Qt.WindowMinimized) | Qt.WindowActive)
+        try:
+            user32 = ctypes.windll.user32
+            kernel32 = ctypes.windll.kernel32
+            user32.GetForegroundWindow.restype = ctypes.c_void_p
+            hwnd = ctypes.c_void_p(int(self.winId()))
+            if user32.IsIconic(hwnd):
+                user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+            else:
+                user32.ShowWindow(hwnd, 5)  # SW_SHOW
+
+            fg_hwnd = user32.GetForegroundWindow()
+            fg_thread = user32.GetWindowThreadProcessId(ctypes.c_void_p(fg_hwnd), None) if fg_hwnd else 0
+            cur_thread = kernel32.GetCurrentThreadId()
+            attached = False
+            if fg_thread and fg_thread != cur_thread:
+                attached = bool(user32.AttachThreadInput(fg_thread, cur_thread, True))
+            try:
+                flags = 0x0001 | 0x0002 | 0x0040  # SWP_NOSIZE | SWP_NOMOVE | SWP_SHOWWINDOW
+                user32.SetWindowPos(hwnd, ctypes.c_void_p(-1), 0, 0, 0, 0, flags)  # HWND_TOPMOST
+                user32.SetWindowPos(hwnd, ctypes.c_void_p(-2), 0, 0, 0, 0, flags)  # HWND_NOTOPMOST
+                user32.BringWindowToTop(hwnd)
+                user32.SetForegroundWindow(hwnd)
+            finally:
+                if attached:
+                    user32.AttachThreadInput(fg_thread, cur_thread, False)
+        except Exception:
+            pass
         self.raise_()
         self.activateWindow()
                 
@@ -1981,44 +2486,59 @@ class DailyTasksWindow(QMainWindow):
 # ═══════════════════════════════════════════════════════════
 class GlobalMenuFilter(QObject):
     """
-    Intercepts every QMenu as it is created/shown to:
+    Intercepts every QMenu and QDialog as it is created/shown to:
     1. Force-disable WA_TranslucentBackground (The inheritance bug)
     2. Force opaque palette and solid background
+    3. Apply theme colors to native Windows dialog title bars via DWM
     """
     def eventFilter(self, obj, event):
-        if event.type() == QEvent.Show and isinstance(obj, QMenu):
-            try:
-                # 1. Disable translucency inherited from parent
-                obj.setAttribute(Qt.WA_TranslucentBackground, False)
-                obj.setAttribute(Qt.WA_NoSystemBackground, False)
-                obj.setAutoFillBackground(True)
-                
-                # 2. Logic to find the current active theme globally
-                main_win = None
-                for top_level in QApplication.topLevelWidgets():
-                    if hasattr(top_level, 'current_theme'):
-                        main_win = top_level
-                        break
-                theme = getattr(main_win, 'current_theme', 'dark') if main_win else 'dark'
-                
-                # 3. Apply solid palette based on theme
-                palette = obj.palette()
-                if theme == 'light':
-                    bg_color = QColor("#FFFFFF")
-                    text_color = QColor("#000000")
-                else:
-                    bg_color = QColor("#1E1E1E")
-                    text_color = QColor("#FFFFFF")
-                
-                palette.setColor(obj.backgroundRole(), bg_color)
-                palette.setColor(obj.foregroundRole(), text_color)
-                obj.setPalette(palette)
-                
-                # 4. Final CSS reinforcement
-                border_color = "#CCCCCC" if theme == 'light' else "#555555"
-                obj.setStyleSheet(f"QMenu {{ background-color: {bg_color.name()}; color: {text_color.name()}; border: 1px solid {border_color}; }}")
-            except:
-                pass
+        if event.type() == QEvent.Show:
+            if isinstance(obj, QDialog):
+                try:
+                    theme = getattr(obj, 'current_theme', None)
+                    if not theme:
+                        for top_level in QApplication.topLevelWidgets():
+                            if hasattr(top_level, 'current_theme') and not isinstance(top_level, QDialog):
+                                theme = getattr(top_level, 'current_theme', 'dark')
+                                break
+                    apply_window_theme_frame(obj, theme or 'dark')
+                except Exception:
+                    pass
+            elif isinstance(obj, QMenu):
+                try:
+                    # 1. Disable translucency inherited from parent
+                    obj.setAttribute(Qt.WA_TranslucentBackground, False)
+                    obj.setAttribute(Qt.WA_NoSystemBackground, False)
+                    obj.setAutoFillBackground(True)
+                    
+                    # 2. Logic to find the current active theme globally
+                    main_win = None
+                    for top_level in QApplication.topLevelWidgets():
+                        if hasattr(top_level, 'current_theme') and not isinstance(top_level, QDialog):
+                            main_win = top_level
+                            break
+                    theme = getattr(main_win, 'current_theme', 'dark') if main_win else 'dark'
+                    spec = get_theme_spec(theme)
+                    
+                    # 3. Apply solid palette based on theme
+                    palette = obj.palette()
+                    bg_color = QColor(spec['dialog_bg'])
+                    text_color = QColor(spec['text_main'])
+                    
+                    palette.setColor(obj.backgroundRole(), bg_color)
+                    palette.setColor(obj.foregroundRole(), text_color)
+                    obj.setPalette(palette)
+                    
+                    # 4. Final CSS reinforcement
+                    border_color = spec['input_border']
+                    obj.setStyleSheet(
+                        f"QMenu {{ background-color: {bg_color.name()}; color: {text_color.name()}; "
+                        f"border: 1px solid {border_color}; border-radius: 8px; padding: 4px; }} "
+                        f"QMenu::item {{ padding: 6px 20px; border-radius: 6px; }} "
+                        f"QMenu::item:selected {{ background-color: {spec['accent_primary']}; color: #FFFFFF; }}"
+                    )
+                except Exception:
+                    pass
                 
         return False
 
@@ -2029,22 +2549,14 @@ def run_qt_app():
     # Dynamic Extreme Resolution Scaling Engine
     # -------------------------------------------------------------
     try:
-        import ctypes
         user32 = ctypes.windll.user32
         # Bypass Windows DPI virtualization to get raw hardware pixels
         user32.SetProcessDPIAware() 
         screen_h = user32.GetSystemMetrics(1)
         
-        # Calculate optimal scale mapping against a standard 1080p baseline
-        # 1366x768  -> ~0.71x (Prevents tiny laptops from clipping)
-        # 1920x1080 -> 1.00x (Standard)
-        # 3840x2160 -> 2.00x (Prevents 4K screens from looking tiny)
         scale = screen_h / 1080.0
-        
-        # Clamp to prevent totally broken bounds
         scale = max(0.65, min(3.0, scale))
         
-        # Override Qt's automatic OS DPI mapping and enforce mathematical resolution scaling
         os.environ["QT_AUTO_SCREEN_SCALE_FACTOR"] = "0"
         os.environ["QT_SCALE_FACTOR"] = str(round(scale, 2))
     except Exception as e:
@@ -2055,8 +2567,7 @@ def run_qt_app():
     # MUST BE DONE BEFORE QAPPLICATION LOADS
     # -------------------------------------------------------------
     try:
-        import ctypes
-        myappid = 'DailyTasks.App.v1.2.5'
+        myappid = f'DailyTasks.App.v{APP_VERSION}'
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
     except Exception as e:
         print(f"AUMID setup failed: {e}")
@@ -2067,46 +2578,34 @@ def run_qt_app():
     app = QApplication(sys.argv)
     
     # -------------------------------------------------------------
+    # Single Instance IPC Server (Win32 Named Pipe, zero QtNetwork dependency)
+    # -------------------------------------------------------------
+    ipc_server = _Win32PipeServer(parent=app)
+    ipc_server.listen()
+    # -------------------------------------------------------------
+
+    # -------------------------------------------------------------
     # NUCLEAR UI FIX: Install Global Menu Filter
     # -------------------------------------------------------------
     menu_filter = GlobalMenuFilter(app)
     app.installEventFilter(menu_filter)
     
-    # -------------------------------------------------------------
-    # App-Wide Icon (Taskbar FIX)
-    # -------------------------------------------------------------
     if hasattr(sys, '_MEIPASS'):
         base_path = sys._MEIPASS
     else:
-        # Resolve from current file location (E:\Programs\Projects\Code\Daily Tasks\src\qt_app.py)
         base_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-            
-    icon_path = os.path.join(base_path, "assets", "icon.png")
-    if os.path.exists(icon_path):
-        app_icon = QIcon(icon_path)
-        app.setWindowIcon(app_icon)
-    
-    # -------------------------------------------------------------
-    # Single Instance Lock (Enforce Only One Instance)
-    # -------------------------------------------------------------
-    socket = QLocalSocket()
-    socket.connectToServer("DailyTasksAppIPCV2_5")
-    if socket.waitForConnected(300):
-        # Connected to a live instance! Send activation signal and exit.
-        socket.write(b"ACTIVATE")
-        socket.waitForBytesWritten(300)
-        socket.disconnectFromServer()
-        sys.exit(0)
-
-    # No live instance running — clean up any stale pipe name
-    QLocalServer.removeServer("DailyTasksAppIPCV2_5")
-    # -------------------------------------------------------------
     
     # Set app-wide font
-    app.setFont(QFont("Roboto", 10))
+    app.setFont(QFont("Segoe UI", 10))
     
     # Create and show window
     window = DailyTasksWindow(base_path=base_path)
+    if not window.windowIcon().isNull():
+        app.setWindowIcon(window.windowIcon())
+    window._ipc_server = ipc_server
+    ipc_server.activated.connect(window._handle_ipc_activation)
+    if ipc_server._pending:
+        window._handle_ipc_activation()
     window.show()
     
     sys.exit(app.exec())

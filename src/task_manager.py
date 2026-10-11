@@ -6,7 +6,29 @@ import queue
 import time
 import copy
 from datetime import datetime, timedelta
-from .api_handler import PrayerTimeHandler
+
+_TIME_SECS_CACHE = {}
+
+
+def _parse_hhmm_to_secs(t_str):
+    """Fast O(1) cached parser converting 'HH:MM' to seconds from midnight (0..86340)."""
+    cached = _TIME_SECS_CACHE.get(t_str)
+    if cached is not None:
+        return cached
+    if not isinstance(t_str, str) or ":" not in t_str:
+        raise ValueError("Invalid time string")
+    parts = t_str.split(":")
+    if len(parts) != 2:
+        raise ValueError("Invalid time format")
+    h = int(parts[0])
+    m = int(parts[1])
+    if not (0 <= h <= 23 and 0 <= m <= 59):
+        raise ValueError("Time out of range")
+    secs = (h * 60 + m) * 60
+    if len(_TIME_SECS_CACHE) < 1500:
+        _TIME_SECS_CACHE[t_str] = secs
+    return secs
+
 
 def get_data_file_path():
     """Get persistent path for tasks.json in AppData"""
@@ -22,7 +44,7 @@ class TaskManager:
     def __init__(self, data_dir=None):
         self.pages = []  # List of page dicts
         self.global_prayers = {} # Dict of global prayer tasks mapped by ID
-        self.prayer_handler = PrayerTimeHandler()
+        self._prayer_handler = None
 
         # Allow tests to override the storage directory
         if data_dir is not None:
@@ -37,6 +59,17 @@ class TaskManager:
         self._save_thread.start()
 
         self.load_tasks()
+
+    @property
+    def prayer_handler(self):
+        if self._prayer_handler is None:
+            from .api_handler import PrayerTimeHandler
+            self._prayer_handler = PrayerTimeHandler()
+        return self._prayer_handler
+
+    @prayer_handler.setter
+    def prayer_handler(self, value):
+        self._prayer_handler = value
 
     def _save_worker(self):
         """Background thread that writes state to disk without blocking the UI"""
@@ -55,7 +88,7 @@ class TaskManager:
                 temp_file = self._data_file + ".tmp"
                 os.makedirs(os.path.dirname(self._data_file), exist_ok=True)
                 with open(temp_file, 'w') as f:
-                    json.dump(state, f, indent=4)
+                    json.dump(state, f, separators=(',', ':'))
                 if os.path.exists(self._data_file):
                     os.replace(temp_file, self._data_file)
                 else:
@@ -70,10 +103,22 @@ class TaskManager:
 
 
     def save_tasks(self):
-        """Queue the current state for asynchronous saving to prevent UI lag"""
+        """Queue a lightweight snapshot of the current state for asynchronous saving"""
         state_copy = {
-            'pages': copy.deepcopy(self.pages),
-            'global_prayers': copy.deepcopy(self.global_prayers)
+            'pages': [
+                {
+                    **p,
+                    'tasks': [
+                        {**t, 'repeat_days': list(t['repeat_days'])} if 'repeat_days' in t else dict(t)
+                        for t in p.get('tasks', ())
+                    ]
+                }
+                for p in self.pages
+            ],
+            'global_prayers': {
+                k: ({**v, 'repeat_days': list(v['repeat_days'])} if 'repeat_days' in v else dict(v))
+                for k, v in self.global_prayers.items()
+            }
         }
         self._save_queue.put(state_copy)
 
@@ -267,8 +312,8 @@ class TaskManager:
         }
         page['tasks'].append(new_task)
 
-        # Immediately apply state consistency
-        self.check_state_consistency(new_task)
+        # Immediately apply state consistency without triggering redundant save
+        self.check_state_consistency(new_task, save=False)
 
         self.save_tasks()
         return new_task
@@ -323,7 +368,7 @@ class TaskManager:
                     return True
         return False
 
-    def check_state_consistency(self, task):
+    def check_state_consistency(self, task, save=True):
         """
         Enforce strict state machine rules based on current time.
         Returns: (new_status, changed_bool)
@@ -335,29 +380,33 @@ class TaskManager:
         if len(repeat_days) == 0:
             if task.get('status') != 'disabled':
                 task['status'] = 'disabled'
-                self.save_tasks()
+                if save:
+                    self.save_tasks()
                 return 'disabled', True
             return 'disabled', False
 
         if now.weekday() not in repeat_days:
             if task.get('status') in ['active', 'failed']:
                 task['status'] = 'pending'
-                self.save_tasks()
+                if save:
+                    self.save_tasks()
                 return 'pending', True
             return task.get('status', 'pending'), False
 
         try:
-            start_dt = datetime.combine(now.date(), datetime.strptime(task['start_time'], "%H:%M").time())
-            end_dt = datetime.combine(now.date(), datetime.strptime(task['end_time'], "%H:%M").time())
-        except ValueError:
-            return task['status'], False
+            start_secs = _parse_hhmm_to_secs(task['start_time'])
+            end_secs = _parse_hhmm_to_secs(task['end_time'])
+        except (ValueError, KeyError):
+            return task.get('status', 'pending'), False
+
+        now_secs = now.hour * 3600 + now.minute * 60 + now.second + (0.000001 if now.microsecond else 0.0)
 
         # Midnight Handling
-        if end_dt < start_dt:
+        if end_secs < start_secs:
             if now.hour < 12:
-                start_dt -= timedelta(days=1)
+                start_secs -= 86400
             else:
-                end_dt += timedelta(days=1)
+                end_secs += 86400
 
         current_status = task.get('status', 'pending')
         new_status = current_status
@@ -365,19 +414,20 @@ class TaskManager:
         if current_status == 'done':
             return 'done', False
 
-        if now < start_dt:
+        if now_secs < start_secs:
             if current_status in ['active', 'failed']:
                 new_status = 'pending'
-        elif start_dt <= now <= end_dt:
+        elif start_secs <= now_secs <= end_secs:
             if current_status in ['pending', 'failed']:
                 new_status = 'active'
-        elif now > end_dt:
+        elif now_secs > end_secs:
             if current_status in ['pending', 'active']:
                 new_status = 'failed'
 
         if new_status != current_status:
             task['status'] = new_status
-            self.save_tasks()
+            if save:
+                self.save_tasks()
             return new_status, True
 
         return current_status, False
@@ -482,6 +532,7 @@ class TaskManager:
             'Isha': '🌙'
         }
 
+        changed = False
         for i in range(len(prayer_list)):
             name, start_t = prayer_list[i]
 
@@ -497,7 +548,14 @@ class TaskManager:
             global_id = f"global_{name}"
 
             if global_id in self.global_prayers:
-                self.global_prayers[global_id].update({
+                existing = self.global_prayers[global_id]
+                if (existing.get('start_time') != start_t or
+                        existing.get('end_time') != end_t or
+                        existing.get('image_path') != icon or
+                        not existing.get('is_synced', False) or
+                        not existing.get('enabled', False)):
+                    changed = True
+                existing.update({
                     'start_time': start_t,
                     'end_time': end_t,
                     'image_path': icon,
@@ -505,6 +563,7 @@ class TaskManager:
                     'enabled': True
                 })
             else:
+                changed = True
                 self.global_prayers[global_id] = {
                     "id": global_id,
                     "name": name,
@@ -518,14 +577,20 @@ class TaskManager:
                     "created_at": datetime.now().isoformat()
                 }
 
-        self.save_tasks()
+        self.last_prayer_sync_changed = changed
+        if changed:
+            self.save_tasks()
         return True
 
     def remove_synced_tasks(self, page_id=None):
         """Hide/Disable synced tasks globally"""
+        changed = False
         for t in self.global_prayers.values():
-            t['enabled'] = False
-        self.save_tasks()
+            if t.get('enabled', True):
+                t['enabled'] = False
+                changed = True
+        if changed:
+            self.save_tasks()
         
     def _iter_all_stored_tasks(self):
         """Yields all tasks across all pages and global prayers for synchronization."""
@@ -539,9 +604,10 @@ class TaskManager:
 
     def reset_daily_tasks(self):
         """Reset task statuses to 'pending' for the new day across ALL tasks."""
-        from datetime import datetime, timedelta
         now = datetime.now()
         today_str = now.strftime("%Y-%m-%d")
+        now_secs = now.hour * 3600 + now.minute * 60 + now.second + (0.000001 if now.microsecond else 0.0)
+        now_hour = now.hour
 
         for task in self._iter_all_stored_tasks():
             # SAFETY: If completed TODAY, do not reset
@@ -552,16 +618,16 @@ class TaskManager:
 
             # Check overnight tasks
             try:
-                start_dt = datetime.combine(now.date(), datetime.strptime(task['start_time'], "%H:%M").time())
-                end_dt = datetime.combine(now.date(), datetime.strptime(task['end_time'], "%H:%M").time())
+                start_secs = _parse_hhmm_to_secs(task['start_time'])
+                end_secs = _parse_hhmm_to_secs(task['end_time'])
 
-                if end_dt < start_dt:
-                    if now.hour < 12:
-                        start_dt -= timedelta(days=1)
+                if end_secs < start_secs:
+                    if now_hour < 12:
+                        start_secs -= 86400
                     else:
-                        end_dt += timedelta(days=1)
+                        end_secs += 86400
 
-                if start_dt <= now <= end_dt and task['status'] == 'active':
+                if start_secs <= now_secs <= end_secs and task['status'] == 'active':
                     continue
             except (ValueError, KeyError):
                 pass
@@ -577,10 +643,10 @@ class TaskManager:
         Returns (modified, changes) where changes is a list of
         (task_dict, old_status, new_status) tuples for every transition.
         """
-        from datetime import datetime, timedelta
-
         now = datetime.now()
-        today_str = now.strftime("%Y-%m-%d")
+        now_secs = now.hour * 3600 + now.minute * 60 + now.second + (0.000001 if now.microsecond else 0.0)
+        now_hour = now.hour
+        current_weekday = now.weekday()
         modified = False
         changes = []  # [(task, old_status, new_status), ...]
 
@@ -597,13 +663,12 @@ class TaskManager:
             end_str = task.get('end_time', '23:59')
 
             try:
-                start_dt = datetime.strptime(f"{today_str} {start_str}", "%Y-%m-%d %H:%M")
-                end_dt = datetime.strptime(f"{today_str} {end_str}", "%Y-%m-%d %H:%M")
+                start_secs = _parse_hhmm_to_secs(start_str)
+                end_secs = _parse_hhmm_to_secs(end_str)
             except ValueError:
                 continue
 
             repeat_days = task.get('repeat_days', [0,1,2,3,4,5,6])
-            current_weekday = now.weekday()
 
             if len(repeat_days) == 0:
                 new_status = 'disabled'
@@ -611,15 +676,15 @@ class TaskManager:
                 new_status = 'pending'
             else:
                 # Midnight handling: consistent with check_state_consistency
-                if end_dt < start_dt:
-                    if now.hour < 12:
-                        start_dt -= timedelta(days=1)
+                if end_secs < start_secs:
+                    if now_hour < 12:
+                        start_secs -= 86400
                     else:
-                        end_dt += timedelta(days=1)
+                        end_secs += 86400
 
-                if start_dt <= now <= end_dt:
+                if start_secs <= now_secs <= end_secs:
                     new_status = 'active'
-                elif now < start_dt:
+                elif now_secs < start_secs:
                     new_status = 'pending'
                 else:
                     new_status = 'failed'
@@ -645,7 +710,7 @@ class TaskManager:
             if 'completed_at' in task:
                 del task['completed_at']
                 
-            self.check_state_consistency(task)
+            self.check_state_consistency(task, save=False)
             
         page['tasks'] = tasks
         self.save_tasks()

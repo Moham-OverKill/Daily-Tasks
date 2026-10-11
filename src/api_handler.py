@@ -16,19 +16,82 @@ Features:
 """
 
 import os
+import sys
 import json
-import requests
 import time
+import urllib.parse
 from datetime import datetime
 
 from .prayer_calculator import calculate_prayer_times, CALCULATION_METHODS, get_method_names
 
 
+def _http_get_json(url, params=None, headers=None, timeout=3):
+    """
+    Zero-dependency HTTP/HTTPS JSON fetcher.
+    Uses native Win32 WinINet on Windows (zero Python networking/SSL imports at cold boot),
+    with lazy-imported stdlib urllib.request fallback.
+    """
+    if params:
+        sep = "&" if "?" in url else "?"
+        url = f"{url}{sep}{urllib.parse.urlencode(params)}"
+
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            wininet = ctypes.windll.wininet
+            wininet.InternetOpenW.restype = ctypes.c_void_p
+            wininet.InternetOpenUrlW.restype = ctypes.c_void_p
+            h_inet = wininet.InternetOpenW("DailyTasks/2.5", 0, None, None, 0)
+            if h_inet:
+                try:
+                    INTERNET_FLAG_RELOAD = 0x80000000
+                    INTERNET_FLAG_NO_CACHE_WRITE = 0x04000000
+                    hdr_str = None
+                    if headers:
+                        hdr_str = "\r\n".join(f"{k}: {v}" for k, v in headers.items()) + "\r\n"
+                    h_url = wininet.InternetOpenUrlW(
+                        ctypes.c_void_p(h_inet), url, hdr_str, len(hdr_str) if hdr_str else 0,
+                        INTERNET_FLAG_RELOAD | INTERNET_FLAG_NO_CACHE_WRITE, 0
+                    )
+                    if h_url:
+                        try:
+                            chunks = []
+                            buf = ctypes.create_string_buffer(4096)
+                            bytes_read = ctypes.c_ulong(0)
+                            while wininet.InternetReadFile(
+                                ctypes.c_void_p(h_url), buf, 4096, ctypes.byref(bytes_read)
+                            ) and bytes_read.value > 0:
+                                chunks.append(buf.raw[:bytes_read.value])
+                            if chunks:
+                                return json.loads(b"".join(chunks).decode("utf-8", errors="replace"))
+                        finally:
+                            wininet.InternetCloseHandle(ctypes.c_void_p(h_url))
+                finally:
+                    wininet.InternetCloseHandle(ctypes.c_void_p(h_inet))
+        except Exception:
+            pass
+
+    req_headers = {"User-Agent": "DailyTasks/2.5"}
+    if headers:
+        req_headers.update(headers)
+
+    try:
+        import urllib.request
+        req = urllib.request.Request(url, headers=req_headers)
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            if getattr(resp, "status", 200) == 200:
+                return json.loads(resp.read().decode("utf-8", errors="replace"))
+    except Exception:
+        pass
+    return None
+
+
+
 class PrayerTimeHandler:
     """
     Handles prayer time calculation with global location awareness.
-    Primary: Local math-based calculation (offline, instant).
-    Fallback: Aladhan API (online, monthly cache).
+    Primary: Local daily cache / pure-math calculation (offline, instant).
+    Fallback: Aladhan API (online, cached daily).
     """
     
     def __init__(self):
@@ -58,20 +121,23 @@ class PrayerTimeHandler:
         Returns dict: {'Fajr': '05:00', 'Sunrise': '06:30', ...} or None if failed.
         
         Strategy:
-          1. If we have coordinates → try Aladhan API (online source of truth)
-          2. API success? → Save result to local cache (stamped with today's date)
-          3. API fails/offline? → Check local cache. If for today, use it.
-          4. No valid cache? → Fall back to local calculation (offline buffer)
-          5. If no coordinates → try auto-detect location first
-          6. If all fails → return None
+          1. Check local cache first. If stamped with today's date, return immediately (0ms network cost).
+          2. Ensure coordinates exist (auto-detect or fallback).
+          3. Try Aladhan API to populate today's cache.
+          4. Fall back to local astronomical calculation if offline.
         """
+        # 1. FAST PATH: Check today's cached results first (eliminates redundant network requests)
+        try:
+            cached_result = self._load_cache()
+            if cached_result:
+                return cached_result
+        except Exception as e:
+            print(f"Failed to load cached prayer times: {e}")
+
         now = datetime.now()
         # Ensure we have a location
         if self.latitude is None or self.longitude is None:
-            # Try auto-detect
             if not self.auto_detect_location():
-                # LAST RESORT: Default to a sensible location (e.g., Mecca) if absolutely nothing else works
-                # This ensures the feature doesn't just "break" for new users without internet
                 print("Location detection failed. Falling back to default coordinates (Mecca).")
                 self.latitude = 21.4225
                 self.longitude = 39.8262
@@ -86,27 +152,16 @@ class PrayerTimeHandler:
             if self.timezone is None:
                 self.timezone = 0
         
-        # 1. PRIMARY: Try Aladhan API (Online source of truth)
-        # Prioritized because API data often includes region-specific offsets
+        # 2. ONLINE FETCH: Try Aladhan API when today's cache is missing
         try:
             api_result = self._fetch_from_api()
             if api_result:
-                # Successfully fetched? -> Renew the local cache for today
                 self._save_cache(api_result)
                 return api_result
         except Exception as e:
-            print(f"Internet fetch failed, checking cache: {e}")
-        
-        # 2. CACHE: Try loading today's cached API results (Offline persistence)
-        # Prevents recalculation if we already had the official times earlier today
-        try:
-            cached_result = self._load_cache()
-            if cached_result:
-                return cached_result
-        except Exception as e:
-            print(f"Failed to load cached prayer times: {e}")
+            print(f"Internet fetch failed, falling back to local calculation: {e}")
 
-        # 4. FINAL FALLBACK: Local calculation with cached coordinates (if any exist)
+        # 3. OFFLINE CALCULATION: Pure math fallback with cached coordinates
         if self.latitude is not None and self.longitude is not None:
              try:
                 result = calculate_prayer_times(
@@ -114,6 +169,7 @@ class PrayerTimeHandler:
                     timezone=self.timezone or 0, method=self.method or 2, asr_school=self.asr_school or 0
                 )
                 if result:
+                    self._save_cache(result)
                     return result
              except Exception:
                 pass
@@ -129,29 +185,27 @@ class PrayerTimeHandler:
         Returns True if successful, False otherwise.
         """
         try:
-            response = requests.get(
+            data = _http_get_json(
                 "http://ip-api.com/json/?fields=status,city,country,lat,lon,timezone,offset",
-                timeout=5
+                timeout=3
             )
-            if response.status_code == 200:
-                data = response.json()
-                if data.get('status') == 'success':
-                    self.latitude = data['lat']
-                    self.longitude = data['lon']
-                    self.city = data.get('city', 'Unknown')
-                    self.country = data.get('country', 'Unknown')
-                    # offset is in seconds, convert to hours
-                    self.timezone = data.get('offset', 0) / 3600.0
-                    
-                    # Auto-select calculation method based on country
-                    self._auto_select_method()
-                    
-                    # Persist
-                    self._save_location_config()
-                    
-                    print(f"Location detected: {self.city}, {self.country} "
-                          f"({self.latitude}, {self.longitude}) UTC{self.timezone:+.1f}")
-                    return True
+            if isinstance(data, dict) and data.get('status') == 'success':
+                self.latitude = data['lat']
+                self.longitude = data['lon']
+                self.city = data.get('city', 'Unknown')
+                self.country = data.get('country', 'Unknown')
+                # offset is in seconds, convert to hours
+                self.timezone = data.get('offset', 0) / 3600.0
+                
+                # Auto-select calculation method based on country
+                self._auto_select_method()
+                
+                # Persist
+                self._save_location_config()
+                
+                print(f"Location detected: {self.city}, {self.country} "
+                      f"({self.latitude}, {self.longitude}) UTC{self.timezone:+.1f}")
+                return True
                     
         except Exception as e:
             print(f"Auto-detect location failed: {e}")
@@ -173,24 +227,22 @@ class PrayerTimeHandler:
             }
             headers = {'User-Agent': 'DailyTasks/1.3'}
             
-            response = requests.get(url, params=params, headers=headers, timeout=10)
-            if response.status_code == 200:
-                results = response.json()
-                if results:
-                    self.latitude = float(results[0]['lat'])
-                    self.longitude = float(results[0]['lon'])
-                    self.city = city
-                    self.country = country
-                    
-                    # Auto-detect timezone from system
-                    utc_offset = datetime.now().astimezone().utcoffset()
-                    self.timezone = utc_offset.total_seconds() / 3600.0
-                    
-                    self._auto_select_method()
-                    self._save_location_config()
-                    
-                    print(f"Location set: {city}, {country} ({self.latitude}, {self.longitude})")
-                    return True
+            results = _http_get_json(url, params=params, headers=headers, timeout=5)
+            if results and isinstance(results, list):
+                self.latitude = float(results[0]['lat'])
+                self.longitude = float(results[0]['lon'])
+                self.city = city
+                self.country = country
+                
+                # Auto-detect timezone from system
+                utc_offset = datetime.now().astimezone().utcoffset()
+                self.timezone = utc_offset.total_seconds() / 3600.0
+                
+                self._auto_select_method()
+                self._save_location_config()
+                
+                print(f"Location set: {city}, {country} ({self.latitude}, {self.longitude})")
+                return True
                     
         except Exception as e:
             print(f"Manual location lookup failed: {e}")
@@ -324,16 +376,14 @@ class PrayerTimeHandler:
                 'date_or_timestamp': int(time.time())
             }
             
-            response = requests.get(url, params=params, timeout=5)
-            if response.status_code == 200:
-                data = response.json()
-                if 'data' in data and 'timings' in data['data']:
-                    timings = data['data']['timings']
-                    # Clean timezone suffixes like "(EEST)"
-                    clean = {}
-                    for prayer, time_str in timings.items():
-                        clean[prayer] = time_str.split()[0]
-                    return clean
+            data = _http_get_json(url, params=params, timeout=3)
+            if isinstance(data, dict) and 'data' in data and 'timings' in data['data']:
+                timings = data['data']['timings']
+                # Clean timezone suffixes like "(EEST)"
+                clean = {}
+                for prayer, time_str in timings.items():
+                    clean[prayer] = time_str.split()[0]
+                return clean
                     
         except Exception as e:
             print(f"Aladhan API fallback failed: {e}")
