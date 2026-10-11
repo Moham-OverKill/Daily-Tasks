@@ -7,29 +7,29 @@ from PyInstaller.utils.hooks import collect_data_files
 
 block_cipher = None
 
-# Explicitly list what we NEED
-NEEDED_QT_DLLS = [
-    'Qt6Core.dll',
-    'Qt6Gui.dll', 
-    'Qt6Widgets.dll',
-]
-
-# Qt modules/DLLs to EXCLUDE (saves ~36MB+)
+# Qt modules/DLLs to EXCLUDE
 EXCLUDED_BINARIES = [
-    'opengl32sw.dll',      # 20MB - Software OpenGL fallback
-    'Qt6Quick.dll',        # 6MB - QML engine
-    'Qt6Pdf.dll',          # 5MB - PDF support
-    'Qt6Qml.dll',          # 5MB - QML support  
+    'opengl32sw.dll',       # 20MB - Software OpenGL fallback
+    'Qt6OpenGL.dll',        # 1.9MB - Not imported by QtWidgets/QtGui/QtCore
+    'Qt6Network.dll',       # 1.7MB - Replaced by Win32 Named Pipe + WinINet
+    'Qt6Quick.dll',         # QML engine
+    'Qt6Pdf.dll',           # PDF support
+    'Qt6Qml.dll',           # QML support
     'Qt6QmlModels.dll',
     'Qt6QmlMeta.dll',
+    'Qt6QmlWorkerScript.dll',
     'Qt6VirtualKeyboard.dll',
-    'Qt6Svg.dll',          # SVG support (not needed)
+    'Qt6Svg.dll',
     'd3dcompiler_47.dll',
     'qdirect2d.dll',
     'libcrypto-3-x64.dll',
-    
-    # NEW EXCLUSIONS FOR EXTREME LIGHTWEIGHTING
-    # 'Qt6Network.dll', # Restored: Needed for QLocalServer (Single Instance Lock)
+    'libcrypto-3.dll',      # 5.1MB - Not needed (HTTPS handled by OS WinINet/Schannel)
+    'libssl-3.dll',         # 0.8MB - Not needed
+    '_ssl.pyd',
+    '_hashlib.pyd',
+    '_lzma.pyd',
+    '_bz2.pyd',
+    'unicodedata.pyd',      # 1.1MB - Not needed at runtime
     'Qt6WebEngineCore.dll',
     'Qt6WebEngineWidgets.dll',
     'Qt6Sql.dll',
@@ -38,15 +38,28 @@ EXCLUDED_BINARIES = [
     'Qt6Bluetooth.dll',
     'Qt6DBus.dll',
     'Qt6StateMachine.dll',
-    
     'QtQuick.pyd',
     'QtQml.pyd',
     'QtOpenGL.pyd',
     'QtPdf.pyd',
     'QtSvg.pyd',
-    # 'QtNetwork.pyd',  # Restored: Needed for QLocalServer/IPC
+    'QtNetwork.pyd',        # 1.1MB - Replaced by Win32 Named Pipe IPC
     'QtSql.pyd',
     'QtMultimedia.pyd',
+    # Unused image format & platform plugins (keep qwindows.dll, qico.dll, qjpeg.dll)
+    'qwebp.dll',
+    'qtiff.dll',
+    'qicns.dll',
+    'qpdf.dll',
+    'qwbmp.dll',
+    'qsvg.dll',
+    'qgif.dll',
+    'qtga.dll',
+    'qminimal.dll',
+    'qoffscreen.dll',
+    'qsvgicon.dll',
+    'qtuiotouchplugin.dll',
+    'qtvirtualkeyboardplugin.dll',
 ]
 
 # Exclude entire unnecessary Qt plugin folders
@@ -54,11 +67,26 @@ EXCLUDED_QT_PLUGINS = [
     'qml',
     'translations',
     'virtualkeyboard',
+    'platforminputcontexts',
     'sqldrivers',
     'multimedia',
     'webview',
     'tls',
-    'scenegraph'
+    'networkinformation',
+    'generic',
+    'iconengines',
+    'scenegraph',
+    'geometryloaders',
+    'renderers',
+    'renderplugins',
+    'sceneparsers',
+]
+
+# Strip all Qt translation .qm files and unused asset files
+EXCLUDED_DATA_PATTERNS = [
+    '.qm',          # Qt translation files (~8.5 MB across 97 locale files)
+    'badge.ico',    # Unused legacy icon
+    'check.svg',    # Unused SVG asset
 ]
 
 a = Analysis(
@@ -76,12 +104,8 @@ a = Analysis(
         'src.qt_effects',
         'src.task_manager',
         'src.sound_manager',
-        'src.prayer_calculator',
-        'email',
-        'email.mime',
-        'email.mime.multipart',
-        'email.mime.text',
-        'email.parser',
+        'src.api_handler',
+        'src.updater',
         'shutil',
         'uuid',
     ],
@@ -89,15 +113,32 @@ a = Analysis(
     hooksconfig={},
     runtime_hooks=[],
     excludes=[
+        'PIL',
+        'setuptools',
         'tkinter',
-        'customtkinter', 
+        'customtkinter',
         'numpy',
         'matplotlib',
         'pandas',
         'scipy',
+        'requests',
+        'urllib3',
+        'charset_normalizer',
+        'idna',
+        'certifi',
         'unittest',
         'pydoc',
-        'pdb',
+        'doctest',
+        'compileall',
+        'mailbox',
+        'py_compile',
+        'turtledemo',
+        'lzma',
+        '_lzma',
+        'bz2',
+        '_bz2',
+        # PySide6 modules not used
+        'PySide6.QtNetwork',
         'PySide6.QtQuick',
         'PySide6.QtQuickWidgets',
         'PySide6.QtQml',
@@ -139,24 +180,48 @@ a = Analysis(
         'poplib',
         'imaplib',
         'smtplib',
-        'telnetlib',
         'multiprocessing',
         'curses',
         'dbm',
         'ctypes.test',
         'test',
+        '_decimal',
+        '_zstd',
     ],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
     cipher=block_cipher,
     noarchive=False,
+    optimize=2,
 )
 
-# Filter out excluded binaries
-a.binaries = [b for b in a.binaries if not any(excl in b[0] for excl in EXCLUDED_BINARIES)]
+# ─── Filter excluded binaries & Qt plugin folders ───────────────────────────
+def _keep_binary(dest_name):
+    norm = dest_name.replace('\\', '/')
+    base = norm.rsplit('/', 1)[-1]
+    if any(excl.lower() in norm.lower() for excl in EXCLUDED_BINARIES):
+        return False
+    if any(f'PySide6/plugins/{plugin}/' in norm or f'PySide6/{plugin}/' in norm for plugin in EXCLUDED_QT_PLUGINS):
+        return False
+    # Deduplicate MSVC runtime DLLs: keep VCRUNTIME140* in root and MSVCP140* in PySide6/
+    if 'shiboken6/' in norm and (
+        base.upper().startswith('MSVCP140') or base.upper().startswith('VCRUNTIME140')
+    ):
+        return False
+    if 'PySide6/' in norm and base.upper().startswith('VCRUNTIME140'):
+        return False
+    return True
 
-# Filter out excluded Qt plugins
-a.datas = [d for d in a.datas if not any(f'PySide6/{plugin}' in d[0] for plugin in EXCLUDED_QT_PLUGINS)]
+a.binaries = [b for b in a.binaries if _keep_binary(b[0])]
+
+# ─── Filter excluded Qt plugin folders & unused data files ──────────────────
+a.datas = [d for d in a.datas if not any(
+    f'PySide6/plugins/{plugin}' in d[0].replace('\\', '/') or
+    f'PySide6/{plugin}' in d[0].replace('\\', '/')
+    for plugin in EXCLUDED_QT_PLUGINS
+)]
+a.datas = [d for d in a.datas if not any(d[0].replace('\\', '/').endswith(pat) for pat in EXCLUDED_DATA_PATTERNS)]
+a.datas = [d for d in a.datas if 'certifi' not in d[0].replace('\\', '/')]
 
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
@@ -169,8 +234,7 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,  # Enable UPX compression if available
-    upx_dir='.',
+    upx=False,
     upx_exclude=[],
     runtime_tmpdir=None,
     console=False,
@@ -188,7 +252,7 @@ coll = COLLECT(
     a.zipfiles,
     a.datas,
     strip=False,
-    upx=True,
+    upx=False,
     upx_exclude=[],
     name='Daily Tasks',
 )

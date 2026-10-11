@@ -1,3 +1,10 @@
+# Application version & GitHub Release endpoints
+APP_VERSION = "1.3.0"
+GITHUB_REPO = "Moham-OverKill/Daily-Tasks"
+GITHUB_RELEASES_API_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+GITHUB_RELEASES_PAGE_URL = f"https://github.com/{GITHUB_REPO}/releases/latest"
+INSTALLER_ASSET_NAME = "DailyTasksSetup.exe"
+
 # Icon categories for task selection
 ICON_CATEGORIES = {
     "Essentials 🏠": ["📝", "💻", "💼", "📅", "🏠", "🛒", "🧹", "🔧", "📞", "💳", "🗑️", "📦", "🛋️", "🛁", "🔑", "🔒", "🚪"],
