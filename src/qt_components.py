@@ -21,6 +21,7 @@ from PySide6.QtCore import (
     QPoint, QPointF, QSize, QRectF
 )
 from datetime import datetime, timedelta
+import collections
 import math
 import os
 import sys
@@ -29,6 +30,7 @@ import uuid
 from .constants import APP_VERSION
 
 _TIME_FMT_CACHE = {}
+
 
 
 
@@ -1094,7 +1096,8 @@ class TaskCard(QFrame):
         'active': '#0EA5E9',    # Neon Sky Cyan
         'pending': '#1E293B'    # Obsidian Slate
     }
-    _PIXMAP_CACHE = {}
+    _PIXMAP_CACHE = collections.OrderedDict()
+    _PIXMAP_CACHE_MAX = 32
     
     def __init__(self, task_data, parent=None):
         super().__init__(parent)
@@ -1143,9 +1146,9 @@ class TaskCard(QFrame):
         
         # Update Labels
         self.name_label.setText(task_data['name'])
-        start = task_data.get('start_time', '00:00')
-        end = task_data.get('end_time', '00:00')
-        self.time_label.setText(f"{self._format_time(start)} — {self._format_time(end)}")
+        start = task_data.get('start_time')
+        end = task_data.get('end_time')
+        self.time_label.setText(self._format_time_range(start, end))
         
         # Update Icon (Handle Emoji vs Path)
         self._set_task_icon(task_data.get('image_path', '📝'))
@@ -1195,15 +1198,15 @@ class TaskCard(QFrame):
         layout.addWidget(self.name_label)
         
         # Time range
-        start = self.task_data.get('start_time', '00:00')
-        end = self.task_data.get('end_time', '00:00')
-        self.time_label = QLabel(f"{self._format_time(start)} — {self._format_time(end)}")
+        start = self.task_data.get('start_time')
+        end = self.task_data.get('end_time')
+        self.time_label = QLabel(self._format_time_range(start, end))
         self.time_label.setFont(QFont("Segoe UI", 10))
         self.time_label.setAlignment(Qt.AlignCenter)
         layout.addWidget(self.time_label)
         
     def _set_task_icon(self, icon_val):
-        """Internal helper to render either emoji text or high-quality pixmap"""
+        """Internal helper to render either emoji text or high-quality pixmap with strict LRU bound"""
         try:
             if not icon_val: icon_val = '📝'
             if not isinstance(icon_val, str): icon_val = str(icon_val)
@@ -1223,15 +1226,20 @@ class TaskCard(QFrame):
                     resolved_path = icon_val
 
                 scaled_pixmap = TaskCard._PIXMAP_CACHE.get(resolved_path)
-                if scaled_pixmap is None:
-                    pixmap = QPixmap(resolved_path)
-                    if not pixmap.isNull():
-                        scaled_pixmap = pixmap.scaled(
+                if scaled_pixmap is not None:
+                    TaskCard._PIXMAP_CACHE.move_to_end(resolved_path)
+                else:
+                    raw_pixmap = QPixmap(resolved_path)
+                    if not raw_pixmap.isNull():
+                        scaled_pixmap = raw_pixmap.scaled(
                             70, 70, Qt.KeepAspectRatio, Qt.SmoothTransformation
                         )
-                        if len(TaskCard._PIXMAP_CACHE) >= 32:
-                            TaskCard._PIXMAP_CACHE.pop(next(iter(TaskCard._PIXMAP_CACHE)))
+                        del raw_pixmap
+                        while len(TaskCard._PIXMAP_CACHE) >= TaskCard._PIXMAP_CACHE_MAX:
+                            TaskCard._PIXMAP_CACHE.popitem(last=False)
                         TaskCard._PIXMAP_CACHE[resolved_path] = scaled_pixmap
+                    else:
+                        del raw_pixmap
 
                 if scaled_pixmap is not None and not scaled_pixmap.isNull():
                     self.icon_label.setText("")
@@ -1248,11 +1256,22 @@ class TaskCard(QFrame):
         except Exception as e:
             print(f"Error rendering task icon: {e}")
             self.icon_label.setPixmap(QPixmap())
+
             self.icon_label.setFont(QFont("Segoe UI Emoji", 42))
             self.icon_label.setText('❓')
 
+    def _format_time_range(self, start, end):
+        """Format task start/end time range supporting All Day and Start-only modes"""
+        if not start:
+            return "All Day"
+        if not end:
+            return f"Starts {self._format_time(start)}"
+        return f"{self._format_time(start)} — {self._format_time(end)}"
+
     def _format_time(self, time_str):
         """Format 24h time to 12h format using O(1) integer cache"""
+        if not time_str:
+            return ""
         cached = _TIME_FMT_CACHE.get(time_str)
         if cached is not None:
             return cached
@@ -1362,7 +1381,14 @@ class TaskCard(QFrame):
         theme_key = getattr(self, 'current_theme', 'dark')
         repeat_days = self.task_data.get('repeat_days', [0,1,2,3,4,5,6])
         today_weekday = datetime.now().weekday()
-        style_key = (self.status, theme_key, tuple(repeat_days), today_weekday)
+        style_key = (
+            self.status,
+            theme_key,
+            tuple(repeat_days),
+            today_weekday,
+            self.task_data.get('start_time'),
+            self.task_data.get('end_time'),
+        )
         if getattr(self, '_last_style_key', None) == style_key:
             self._update_card_transform()
             return
@@ -1451,6 +1477,7 @@ class TaskCard(QFrame):
         else:
             # Normal Mode
             self.setCursor(Qt.PointingHandCursor if self.status != 'pending' else Qt.ArrowCursor)
+            self.time_label.setText(self._format_time_range(self.task_data.get('start_time'), self.task_data.get('end_time')))
             self.status_label.setStyleSheet(f"{badge_css} border-radius: 8px; padding: 3px 10px;")
             self.name_label.setStyleSheet(f"color: {text_color}; background: transparent;")
             self.icon_label.setStyleSheet(f"color: {text_color}; background: transparent;")
@@ -1737,6 +1764,39 @@ class TaskCard(QFrame):
         if self.pulse_timer is not None:
             self.pulse_timer.stop()
 
+    def cleanup(self):
+        """Stop all timers/animations and disconnect signals prior to widget destruction."""
+        import warnings
+        self.is_flashing = False
+        self.is_pulsing = False
+        self.blockSignals(True)
+        if self.flash_timer is not None:
+            self.flash_timer.stop()
+            self.flash_timer.deleteLater()
+            self.flash_timer = None
+        if self.pulse_timer is not None:
+            self.pulse_timer.stop()
+            self.pulse_timer.deleteLater()
+            self.pulse_timer = None
+        if self.color_anim is not None:
+            self.color_anim.stop()
+            self.color_anim.deleteLater()
+            self.color_anim = None
+        if self._press_anim is not None:
+            self._press_anim.stop()
+            self._press_anim.deleteLater()
+            self._press_anim = None
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            for sig in (self.clicked, self.delete_requested, self.edit_requested):
+                try:
+                    sig.disconnect()
+                except (RuntimeError, TypeError):
+                    pass
+        if hasattr(self, 'icon_label') and self.icon_label is not None:
+            self.icon_label.setPixmap(QPixmap())
+
+
     def hideEvent(self, event):
         if self.pulse_timer is not None and self.pulse_timer.isActive():
             self.pulse_timer.stop()
@@ -1753,6 +1813,7 @@ class TaskCard(QFrame):
         """Apply theme to card"""
         self.current_theme = theme
         self._update_visuals()
+
 
 
 class DraggablePageListWidget(QWidget):
@@ -2033,21 +2094,47 @@ class PageButton(QFrame):
         drag.setPixmap(pixmap)
         drag.setHotSpot(event.pos())
         
-        # Lift effect handling
-        from PySide6.QtWidgets import QGraphicsOpacityEffect
-        effect = QGraphicsOpacityEffect(self)
-        effect.setOpacity(0.5)
-        self.setGraphicsEffect(effect)
+        # Lift effect handling (reuse existing _opacity_effect to avoid object allocation per drag)
+        self._opacity_effect.setOpacity(0.5)
+        self.setGraphicsEffect(self._opacity_effect)
         
         drag.exec(Qt.MoveAction)
         
         # Reset effect after dropping
         self._apply_style()
+
+    def cleanup(self):
+        """Stop animations and disconnect signals before PageButton removal."""
+        import warnings
+        self.blockSignals(True)
+        if self._hover_anim is not None:
+            self._hover_anim.stop()
+            self._hover_anim.deleteLater()
+            self._hover_anim = None
+        if self._press_anim is not None:
+            self._press_anim.stop()
+            self._press_anim.deleteLater()
+            self._press_anim = None
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            for sig in (
+                self.page_clicked,
+                self.rename_requested,
+                self.delete_requested,
+                self.export_requested,
+                self.mute_requested,
+            ):
+                try:
+                    sig.disconnect()
+                except (RuntimeError, TypeError):
+                    pass
+
     
     def contextMenuEvent(self, event):
         """Right-click context menu"""
         self._show_menu_at(event.globalPos())
         event.accept()
+
 
     def _show_menu_at(self, global_pos):
         """Show context menu at given global position"""
@@ -2289,12 +2376,22 @@ class Sidebar(QFrame):
         """Populate the page list from page metadata list + add New Page button"""
         # Clear existing buttons
         for btn in self._page_buttons.values():
+            btn.cleanup()
             btn.deleteLater()
         self._page_buttons.clear()
         
         if self._add_page_btn:
+            if getattr(self._add_page_btn, '_hover_anim', None) is not None:
+                self._add_page_btn._hover_anim.stop()
+            if getattr(self._add_page_btn, '_press_anim', None) is not None:
+                self._add_page_btn._press_anim.stop()
+            try:
+                self._add_page_btn.clicked.disconnect()
+            except (RuntimeError, TypeError):
+                pass
             self._add_page_btn.deleteLater()
             self._add_page_btn = None
+
         
         # Ensure drop_indicator is removed safely
         if hasattr(self.page_list_widget, 'drop_indicator'):
@@ -3505,21 +3602,57 @@ class AddTaskDialog(QDialog):
         icon_row.addStretch()
         layout.addLayout(icon_row)
         
-        # Time inputs
+        # Time inputs with optional ON/OFF toggles (both OFF by default for new tasks)
         time_layout = QHBoxLayout()
-        
+        time_layout.setSpacing(20)
+
+        has_start = bool(self.task_data.get('start_time')) if self.task_data else False
+        has_end = bool(has_start and self.task_data.get('end_time')) if self.task_data else False
+
+        start_col = QVBoxLayout()
+        start_col.setSpacing(6)
+        start_hdr = QHBoxLayout()
+        start_hdr.setSpacing(8)
         self.start_label = QLabel("Start:")
-        time_layout.addWidget(self.start_label)
-        start_default = self.task_data.get('start_time', '09:00') if self.task_data else datetime.now().strftime("%H:%M")
-        s_widget, self.start_hour, self.start_min, self.start_ampm = self._setup_time_picker(start_default)
-        time_layout.addWidget(s_widget)
-        
+        start_hdr.addWidget(self.start_label)
+        self.start_toggle = QPushButton("ON" if has_start else "OFF")
+        self.start_toggle.setCursor(Qt.PointingHandCursor)
+        self.start_toggle.setCheckable(True)
+        self.start_toggle.setChecked(has_start)
+        self.start_toggle.setFixedSize(48, 24)
+        start_hdr.addWidget(self.start_toggle)
+        start_hdr.addStretch()
+        start_col.addLayout(start_hdr)
+
+        start_default = (self.task_data.get('start_time') or '09:00') if self.task_data else datetime.now().strftime("%H:%M")
+        self.start_picker_widget, self.start_hour, self.start_min, self.start_ampm = self._setup_time_picker(start_default)
+        start_col.addWidget(self.start_picker_widget)
+        time_layout.addLayout(start_col)
+
+        end_col = QVBoxLayout()
+        end_col.setSpacing(6)
+        end_hdr = QHBoxLayout()
+        end_hdr.setSpacing(8)
         self.end_label = QLabel("End:")
-        time_layout.addWidget(self.end_label)
-        end_default = self.task_data.get('end_time', '10:00') if self.task_data else (datetime.now() + timedelta(hours=1)).strftime("%H:%M")
-        e_widget, self.end_hour, self.end_min, self.end_ampm = self._setup_time_picker(end_default)
-        time_layout.addWidget(e_widget)
-        
+        end_hdr.addWidget(self.end_label)
+        self.end_toggle = QPushButton("ON" if has_end else "OFF")
+        self.end_toggle.setCursor(Qt.PointingHandCursor)
+        self.end_toggle.setCheckable(True)
+        self.end_toggle.setChecked(has_end)
+        self.end_toggle.setFixedSize(48, 24)
+        end_hdr.addWidget(self.end_toggle)
+        end_hdr.addStretch()
+        end_col.addLayout(end_hdr)
+
+        end_default = (self.task_data.get('end_time') or '10:00') if self.task_data else (datetime.now() + timedelta(hours=1)).strftime("%H:%M")
+        self.end_picker_widget, self.end_hour, self.end_min, self.end_ampm = self._setup_time_picker(end_default)
+        end_col.addWidget(self.end_picker_widget)
+        time_layout.addLayout(end_col)
+        time_layout.addStretch()
+
+        self.start_toggle.toggled.connect(self._on_time_toggles_changed)
+        self.end_toggle.toggled.connect(self._on_time_toggles_changed)
+
         layout.addLayout(time_layout)
         
         # Recurrence Section
@@ -3594,7 +3727,70 @@ class AddTaskDialog(QDialog):
         
         layout.addLayout(btn_layout)
         
+        self._on_time_toggles_changed()
+
+    def _on_time_toggles_changed(self, _checked=None):
+        """Enforce Start/End toggle dependency and enable/disable time pickers."""
+        if not hasattr(self, 'start_toggle') or not hasattr(self, 'end_toggle'):
+            return
+        start_on = self.start_toggle.isChecked()
+        if not start_on:
+            if self.end_toggle.isChecked():
+                self.end_toggle.blockSignals(True)
+                self.end_toggle.setChecked(False)
+                self.end_toggle.blockSignals(False)
+            self.end_toggle.setEnabled(False)
+        else:
+            self.end_toggle.setEnabled(True)
+
+        end_on = start_on and self.end_toggle.isChecked()
+
+        self.start_toggle.setText("ON" if start_on else "OFF")
+        self.end_toggle.setText("ON" if end_on else "OFF")
+
+        if hasattr(self, 'start_picker_widget'):
+            self.start_picker_widget.setEnabled(start_on)
+        if hasattr(self, 'end_picker_widget'):
+            self.end_picker_widget.setEnabled(end_on)
+
+        self._style_time_toggles()
         self._validate_form()
+
+    def _style_time_toggles(self):
+        """Style the Start and End ON/OFF pill toggle buttons."""
+        if not hasattr(self, 'start_toggle') or not hasattr(self, 'end_toggle'):
+            return
+        spec = get_theme_spec(getattr(self, 'current_theme', 'dark'))
+        is_light = spec["is_light"]
+        unchecked_bg = "#E2E8F0" if is_light else spec["input_bg"]
+        unchecked_fg = spec["text_muted"]
+        unchecked_border = spec["input_border"]
+        disabled_bg = "#F1F5F9" if is_light else spec["dialog_bg"]
+
+        for btn in (self.start_toggle, self.end_toggle):
+            is_checked = btn.isChecked()
+            b_bg = spec["accent_primary"] if is_checked else unchecked_bg
+            b_fg = "#FFFFFF" if is_checked else unchecked_fg
+            b_border = spec["accent"] if is_checked else unchecked_border
+            btn.setStyleSheet(f"""
+                QPushButton {{
+                    background-color: {b_bg};
+                    color: {b_fg};
+                    border: 1px solid {b_border};
+                    border-radius: 11px;
+                    font-weight: bold;
+                    font-size: 10px;
+                    padding: 2px 8px;
+                }}
+                QPushButton:hover:enabled {{
+                    border-color: {spec['accent']};
+                }}
+                QPushButton:disabled {{
+                    background-color: {disabled_bg};
+                    color: {unchecked_fg};
+                    border: 1px solid {unchecked_border};
+                }}
+            """)
 
     def _on_custom_image(self):
         """Open file dialog and copy selection to app cache"""
@@ -3632,14 +3828,17 @@ class AddTaskDialog(QDialog):
                 else:
                     resolved_path = icon_val
 
-                pixmap = QPixmap(resolved_path)
-                if not pixmap.isNull():
-                    self.icon_preview.setText("") 
-                    self.icon_preview.setPixmap(pixmap.scaled(
+                raw_pixmap = QPixmap(resolved_path)
+                if not raw_pixmap.isNull():
+                    scaled_preview = raw_pixmap.scaled(
                         45, 45, Qt.KeepAspectRatio, Qt.SmoothTransformation
-                    ))
+                    )
+                    del raw_pixmap
+                    self.icon_preview.setText("") 
+                    self.icon_preview.setPixmap(scaled_preview)
                     return
                 else:
+                    del raw_pixmap
                     icon_val = '❓'
             
             self.icon_preview.setPixmap(QPixmap()) 
@@ -3648,6 +3847,7 @@ class AddTaskDialog(QDialog):
         except Exception as e:
             print(f"Error updating icon preview: {e}")
             self.icon_preview.setText('❓')
+
 
     def _apply_icon_picker_theme(self):
         """Apply active theme palette to the icon picker view when initialized."""
@@ -3784,6 +3984,8 @@ class AddTaskDialog(QDialog):
         inputs = [self.start_hour, self.start_min, self.end_hour, self.end_min]
         
         if all(hasattr(self, name) for name in ['start_hour', 'start_ampm']):
+            disabled_bg = "#F1F5F9" if is_light else spec["dialog_bg"]
+            disabled_fg = spec["text_muted"]
             input_style = f"""
                 background-color: {input_bg};
                 color: {fg};
@@ -3793,7 +3995,14 @@ class AddTaskDialog(QDialog):
             """
             
             for inp in inputs:
-                inp.setStyleSheet(f"QLineEdit {{ {input_style} }}")
+                inp.setStyleSheet(f"""
+                    QLineEdit {{ {input_style} }}
+                    QLineEdit:disabled {{
+                        background-color: {disabled_bg};
+                        color: {disabled_fg};
+                        border: 1px solid {input_border};
+                    }}
+                """)
 
             ampm_style = f"""
                 QPushButton {{
@@ -3804,12 +4013,19 @@ class AddTaskDialog(QDialog):
                     font-weight: bold;
                     padding: 6px;
                 }}
-                QPushButton:hover {{
+                QPushButton:hover:enabled {{
                     border: 1px solid {focus_border};
+                }}
+                QPushButton:disabled {{
+                    background-color: {disabled_bg};
+                    color: {disabled_fg};
+                    border: 1px solid {input_border};
                 }}
             """
             for ampm_btn in (self.start_ampm, self.end_ampm):
                 ampm_btn.setStyleSheet(ampm_style)
+
+        self._style_time_toggles()
 
         if hasattr(self, 'icon_preview'):
             preview_bg = input_bg
@@ -3951,15 +4167,21 @@ class AddTaskDialog(QDialog):
         scroll.setWidget(scroll_content)
         layout.addWidget(scroll)
 
-        def _filter_icons(text):
-            query = text.strip().lower()
+        self._icon_search_timer = QTimer(self)
+        self._icon_search_timer.setSingleShot(True)
+        self._icon_search_timer.setInterval(120)
+
+        def _apply_icon_filter():
+            query = self.icon_search_input.text().strip().lower()
             for cat_lower, icon_list, sec_widget in self._icon_category_sections:
                 if not query or query in cat_lower or any(query in ic for ic in icon_list):
                     sec_widget.show()
                 else:
                     sec_widget.hide()
 
-        self.icon_search_input.textChanged.connect(_filter_icons)
+        self._icon_search_timer.timeout.connect(_apply_icon_filter)
+        self.icon_search_input.textChanged.connect(lambda _text: self._icon_search_timer.start())
+
         
     def _show_icon_picker(self):
         if not self._icon_picker_initialized:
@@ -4003,45 +4225,46 @@ class AddTaskDialog(QDialog):
         if not self.name_input.text().strip():
             valid = False
             
-        # Time validation
-        try:
-            sh = int(self.start_hour.text())
-            sm = int(self.start_min.text())
-            eh = int(self.end_hour.text())
-            em = int(self.end_min.text())
-            
-            if not (1 <= sh <= 12 and 0 <= sm <= 59): valid = False
-            if not (1 <= eh <= 12 and 0 <= em <= 59): valid = False
-            
-            # Validate start time is before end time
-            if valid:
-                # Convert to 24h for comparison
-                start_period = self.start_ampm.text()
-                end_period = self.end_ampm.text()
-                
-                # Convert to 24h format
-                if start_period == 'AM':
-                    start_24h = 0 if sh == 12 else sh
-                else:  # PM
-                    start_24h = 12 if sh == 12 else sh + 12
-                
-                if end_period == 'AM':
-                    end_24h = 0 if eh == 12 else eh
-                else:  # PM
-                    end_24h = 12 if eh == 12 else eh + 12
-                
-                # Compare times (hour * 60 + min)
-                start_mins = start_24h * 60 + sm
-                end_mins = end_24h * 60 + em
-                
-                # Start must be before end (allow overnight tasks like 11PM to 1AM)
-                # Only block if SAME DAY and start >= end
-                # Allow overnight: e.g., 11PM (start_mins=1380) to 1AM (end_mins=60) is OK
-                if start_mins >= end_mins and not (start_period == 'PM' and end_period == 'AM'):
+        start_on = hasattr(self, 'start_toggle') and self.start_toggle.isChecked()
+        end_on = start_on and hasattr(self, 'end_toggle') and self.end_toggle.isChecked()
+
+        # Time validation (only for enabled toggles)
+        if start_on:
+            try:
+                sh = int(self.start_hour.text())
+                sm = int(self.start_min.text())
+                if not (1 <= sh <= 12 and 0 <= sm <= 59):
                     valid = False
-                    
-        except ValueError:
-            valid = False
+
+                if end_on:
+                    eh = int(self.end_hour.text())
+                    em = int(self.end_min.text())
+                    if not (1 <= eh <= 12 and 0 <= em <= 59):
+                        valid = False
+                
+                    # Validate start time is before end time
+                    if valid:
+                        start_period = self.start_ampm.text()
+                        end_period = self.end_ampm.text()
+                        
+                        if start_period == 'AM':
+                            start_24h = 0 if sh == 12 else sh
+                        else:  # PM
+                            start_24h = 12 if sh == 12 else sh + 12
+                        
+                        if end_period == 'AM':
+                            end_24h = 0 if eh == 12 else eh
+                        else:  # PM
+                            end_24h = 12 if eh == 12 else eh + 12
+                        
+                        start_mins = start_24h * 60 + sm
+                        end_mins = end_24h * 60 + em
+                        
+                        # Start must be before end (allow overnight tasks like 11PM to 1AM)
+                        if start_mins >= end_mins and not (start_period == 'PM' and end_period == 'AM'):
+                            valid = False
+            except ValueError:
+                valid = False
             
         self.save_btn.setEnabled(valid)
         
@@ -4076,10 +4299,15 @@ class AddTaskDialog(QDialog):
                     print(f"Failed to cache image on save: {e}")
                     final_icon_path = '❓'
 
+        start_on = hasattr(self, 'start_toggle') and self.start_toggle.isChecked()
+        end_on = start_on and hasattr(self, 'end_toggle') and self.end_toggle.isChecked()
+        start_time = self._get_time_from_picker(self.start_hour, self.start_min, self.start_ampm) if start_on else None
+        end_time = self._get_time_from_picker(self.end_hour, self.end_min, self.end_ampm) if end_on else None
+
         return {
             'name': self.name_input.text(),
             'image_path': final_icon_path,
-            'start_time': self._get_time_from_picker(self.start_hour, self.start_min, self.start_ampm),
-            'end_time': self._get_time_from_picker(self.end_hour, self.end_min, self.end_ampm),
+            'start_time': start_time,
+            'end_time': end_time,
             'repeat_days': repeat_days
         }

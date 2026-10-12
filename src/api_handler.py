@@ -328,9 +328,21 @@ class PrayerTimeHandler:
         if not os.path.exists(self.config_file):
             return
         try:
-            with open(self.config_file, 'r') as f:
+            with open(self.config_file, 'r', encoding='utf-8') as f:
                 config = json.load(f)
-            
+        except Exception as e:
+            print(f"Failed to load location config ({e}), checking backup...")
+            bak_file = self.config_file + ".bak"
+            if os.path.exists(bak_file):
+                try:
+                    with open(bak_file, 'r', encoding='utf-8') as bf:
+                        config = json.load(bf)
+                except Exception:
+                    return
+            else:
+                return
+
+        try:
             self.latitude = config.get('latitude')
             self.longitude = config.get('longitude')
             self.city = config.get('city')
@@ -338,13 +350,13 @@ class PrayerTimeHandler:
             self.timezone = config.get('timezone')
             self.method = config.get('method', 2)
             self.asr_school = config.get('asr_school', 0)
-            
         except Exception as e:
-            print(f"Failed to load location config: {e}")
+            print(f"Failed to apply location config: {e}")
     
     def _save_location_config(self):
-        """Persist location configuration."""
+        """Persist location configuration atomically."""
         try:
+            import shutil
             config = {
                 'latitude': self.latitude,
                 'longitude': self.longitude,
@@ -355,8 +367,19 @@ class PrayerTimeHandler:
                 'asr_school': self.asr_school,
                 'updated_at': datetime.now().isoformat()
             }
-            with open(self.config_file, 'w') as f:
+            os.makedirs(os.path.dirname(self.config_file), exist_ok=True)
+            tmp_file = self.config_file + ".tmp"
+            bak_file = self.config_file + ".bak"
+            with open(tmp_file, 'w', encoding='utf-8') as f:
                 json.dump(config, f, indent=2)
+                f.flush()
+            if os.path.exists(self.config_file):
+                try:
+                    if os.path.getsize(self.config_file) > 2:
+                        shutil.copy2(self.config_file, bak_file)
+                except OSError:
+                    pass
+            os.replace(tmp_file, self.config_file)
         except Exception as e:
             print(f"Failed to save location config: {e}")
     
@@ -404,7 +427,7 @@ class PrayerTimeHandler:
         if not os.path.exists(self.cache_file):
             return {}
         try:
-            with open(self.cache_file, 'r') as f:
+            with open(self.cache_file, 'r', encoding='utf-8') as f:
                 cache_data = json.load(f)
             
             # Use strict YYYY-MM-DD validation
@@ -418,13 +441,18 @@ class PrayerTimeHandler:
             return {}
 
     def _save_cache(self, timings):
-        """Save timings to persistent cache with daily date stamp."""
+        """Save timings to persistent cache atomically with daily date stamp."""
         try:
             cache_data = {
                 'date': datetime.now().strftime('%Y-%m-%d'),
                 'timings': timings
             }
-            with open(self.cache_file, 'w') as f:
+            os.makedirs(os.path.dirname(self.cache_file), exist_ok=True)
+            tmp_file = self.cache_file + ".tmp"
+            with open(tmp_file, 'w', encoding='utf-8') as f:
                 json.dump(cache_data, f, indent=4)
+                f.flush()
+            os.replace(tmp_file, self.cache_file)
         except Exception as e:
             print(f"Failed to save cache: {e}")
+

@@ -94,10 +94,28 @@ class SoundManager:
         self._queue = collections.deque(maxlen=12)
         self._wake_event = threading.Event()
         self._closed = False
+        self._reset_requested = False
 
         # Start dedicated daemon worker to preload buffers & drive WinMM pool
         self._worker = threading.Thread(target=self._audio_worker_loop, daemon=True)
         self._worker.start()
+
+    def reset_audio_devices(self):
+        """Request the worker thread to close and re-open WinMM waveOut handles (e.g. after sleep/wake or device swap)."""
+        if not self._closed:
+            self._reset_requested = True
+            self._wake_event.set()
+
+    def close(self):
+        """Cleanly shut down the audio worker and release all WinMM waveOut handles."""
+        if not self._closed:
+            self._closed = True
+            self._wake_event.set()
+            try:
+                if self._worker.is_alive():
+                    self._worker.join(timeout=0.5)
+            except Exception:
+                pass
 
     # ─────────────────────────────────────────────────────────
     # Settings & Volume Controls
@@ -122,7 +140,7 @@ class SoundManager:
     # Core Task Alert Chimes (Unaffected by UI SFX Mute/Volume)
     # ─────────────────────────────────────────────────────────
     def _play_alert(self, filename: str):
-        if self.dnd_enabled:
+        if self.dnd_enabled or self._closed:
             return
         self._queue.append(("alert", filename))
         self._wake_event.set()
@@ -147,7 +165,8 @@ class SoundManager:
     # ─────────────────────────────────────────────────────────
     def _can_play_ui_sfx(self) -> bool:
         return (
-            not self.dnd_enabled
+            not self._closed
+            and not self.dnd_enabled
             and self.ui_sounds_enabled
             and self.ui_volume > 0.005
         )
@@ -240,16 +259,12 @@ class SoundManager:
             self._scaled_pcm[fname] = ctypes.create_string_buffer(raw, len(raw))
         self._volume_dirty = False
 
-    def _audio_worker_loop(self):
-        """Dedicated background thread managing the 8-channel WinMM pool."""
-        self._preload_buffers()
-
-        winmm = getattr(ctypes, "windll", None)
-        winmm_dll = getattr(winmm, "winmm", None) if winmm else None
-
-        # Open 8 polyphonic waveOut channels (44.1kHz, 16-bit, stereo)
-        channels = []
-        if winmm_dll is not None:
+    def _open_waveout_pool(self, winmm_dll):
+        """Open fixed pool of 8 polyphonic waveOut channels (44.1kHz, 16-bit, stereo)."""
+        pool = []
+        if winmm_dll is None:
+            return pool
+        try:
             wfx = _WAVEFORMATEX(1, 2, 44100, 44100 * 4, 4, 16, 0)
             for _ in range(self.POOL_CHANNELS):
                 hwo = ctypes.c_void_p()
@@ -263,73 +278,58 @@ class SoundManager:
                 )
                 if res == 0 and hwo.value:
                     hdr = _WAVEHDR()
-                    channels.append((hwo, hdr, None))
+                    pool.append((hwo, hdr, None))
+        except Exception:
+            pass
+        return pool
 
+    def _close_waveout_pool(self, winmm_dll, pool):
+        """Reset, unprepare, and close all waveOut handles in the pool."""
+        if winmm_dll is None or not pool:
+            return
+        for hwo, hdr, _ in pool:
+            try:
+                if hwo and hwo.value:
+                    winmm_dll.waveOutReset(hwo)
+                    if hdr.dwFlags & _WHDR_PREPARED:
+                        winmm_dll.waveOutUnprepareHeader(hwo, ctypes.byref(hdr), ctypes.sizeof(hdr))
+                    winmm_dll.waveOutClose(hwo)
+            except Exception:
+                pass
+        pool.clear()
+
+    def _audio_worker_loop(self):
+        """Dedicated background thread managing the 8-channel WinMM pool."""
+        self._preload_buffers()
+
+        winmm = getattr(ctypes, "windll", None)
+        winmm_dll = getattr(winmm, "winmm", None) if winmm else None
+
+        channels = self._open_waveout_pool(winmm_dll)
         next_ch = 0
 
-        while not self._closed:
-            self._wake_event.wait()
-            self._wake_event.clear()
+        try:
+            while not self._closed:
+                self._wake_event.wait()
+                self._wake_event.clear()
 
-            if self._volume_dirty:
-                self._rebuild_scaled_buffers()
+                if self._closed:
+                    break
 
-            while self._queue:
-                kind, filename = self._queue.popleft()
-                if kind == "alert":
-                    if self.dnd_enabled:
-                        continue
-                    path = os.path.join(self.sounds_dir, filename)
-                    if os.path.exists(path):
-                        try:
-                            winsound.PlaySound(
-                                path,
-                                winsound.SND_FILENAME | winsound.SND_ASYNC | winsound.SND_NODEFAULT,
-                            )
-                        except Exception:
-                            pass
-                elif kind == "ui":
-                    if not self._can_play_ui_sfx():
-                        continue
-                    buf = self._scaled_pcm.get(filename)
-                    if buf is not None and channels and winmm_dll is not None:
-                        try:
-                            # Find a free channel first, or reuse oldest channel
-                            chosen_idx = None
-                            for offset in range(len(channels)):
-                                idx = (next_ch + offset) % len(channels)
-                                hwo, hdr, _ = channels[idx]
-                                if not (hdr.dwFlags & _WHDR_PREPARED) or (hdr.dwFlags & _WHDR_DONE):
-                                    chosen_idx = idx
-                                    break
-                            if chosen_idx is None:
-                                chosen_idx = next_ch
-                                hwo, hdr, _ = channels[chosen_idx]
-                                winmm_dll.waveOutReset(hwo)
+                if self._reset_requested:
+                    self._reset_requested = False
+                    self._close_waveout_pool(winmm_dll, channels)
+                    channels = self._open_waveout_pool(winmm_dll)
+                    next_ch = 0
 
-                            next_ch = (chosen_idx + 1) % len(channels)
-                            hwo, hdr, _ = channels[chosen_idx]
+                if self._volume_dirty:
+                    self._rebuild_scaled_buffers()
 
-                            if hdr.dwFlags & _WHDR_PREPARED:
-                                winmm_dll.waveOutUnprepareHeader(hwo, ctypes.byref(hdr), ctypes.sizeof(hdr))
-
-                            hdr.lpData = ctypes.cast(buf, ctypes.c_char_p)
-                            hdr.dwBufferLength = len(buf)
-                            hdr.dwBytesRecorded = 0
-                            hdr.dwUser = 0
-                            hdr.dwFlags = 0
-                            hdr.dwLoops = 0
-                            hdr.lpNext = None
-                            hdr.reserved = 0
-
-                            # Keep reference to buf in channel tuple so GC never collects during playback
-                            channels[chosen_idx] = (hwo, hdr, buf)
-                            winmm_dll.waveOutPrepareHeader(hwo, ctypes.byref(hdr), ctypes.sizeof(hdr))
-                            winmm_dll.waveOutWrite(hwo, ctypes.byref(hdr), ctypes.sizeof(hdr))
-                        except Exception:
-                            pass
-                    else:
-                        # Fallback if waveOut unavailable
+                while self._queue and not self._closed:
+                    kind, filename = self._queue.popleft()
+                    if kind == "alert":
+                        if self.dnd_enabled:
+                            continue
                         path = os.path.join(self.sounds_dir, filename)
                         if os.path.exists(path):
                             try:
@@ -339,3 +339,71 @@ class SoundManager:
                                 )
                             except Exception:
                                 pass
+                    elif kind == "ui":
+                        if not self._can_play_ui_sfx():
+                            continue
+                        buf = self._scaled_pcm.get(filename)
+                        if buf is not None and winmm_dll is not None:
+                            if not channels:
+                                channels = self._open_waveout_pool(winmm_dll)
+                                next_ch = 0
+
+                        played_via_pool = False
+                        if buf is not None and channels and winmm_dll is not None:
+                            try:
+                                # Find a free channel first, or reuse oldest channel
+                                chosen_idx = None
+                                for offset in range(len(channels)):
+                                    idx = (next_ch + offset) % len(channels)
+                                    hwo, hdr, _ = channels[idx]
+                                    if not (hdr.dwFlags & _WHDR_PREPARED) or (hdr.dwFlags & _WHDR_DONE):
+                                        chosen_idx = idx
+                                        break
+                                if chosen_idx is None:
+                                    chosen_idx = next_ch
+                                    hwo, hdr, _ = channels[chosen_idx]
+                                    winmm_dll.waveOutReset(hwo)
+
+                                next_ch = (chosen_idx + 1) % len(channels)
+                                hwo, hdr, _ = channels[chosen_idx]
+
+                                if hdr.dwFlags & _WHDR_PREPARED:
+                                    winmm_dll.waveOutUnprepareHeader(hwo, ctypes.byref(hdr), ctypes.sizeof(hdr))
+
+                                hdr.lpData = ctypes.cast(buf, ctypes.c_char_p)
+                                hdr.dwBufferLength = len(buf)
+                                hdr.dwBytesRecorded = 0
+                                hdr.dwUser = 0
+                                hdr.dwFlags = 0
+                                hdr.dwLoops = 0
+                                hdr.lpNext = None
+                                hdr.reserved = 0
+
+                                # Keep reference to buf in channel tuple so GC never collects during playback
+                                channels[chosen_idx] = (hwo, hdr, buf)
+                                prep_res = winmm_dll.waveOutPrepareHeader(hwo, ctypes.byref(hdr), ctypes.sizeof(hdr))
+                                write_res = winmm_dll.waveOutWrite(hwo, ctypes.byref(hdr), ctypes.sizeof(hdr)) if prep_res == 0 else prep_res
+                                if write_res == 0:
+                                    played_via_pool = True
+                                else:
+                                    # Audio device handle invalidated (e.g. device unplugged or sleep/wake)
+                                    self._close_waveout_pool(winmm_dll, channels)
+                                    channels = self._open_waveout_pool(winmm_dll)
+                                    next_ch = 0
+                            except Exception:
+                                pass
+
+                        if not played_via_pool:
+                            # Fallback if waveOut unavailable or recovering
+                            path = os.path.join(self.sounds_dir, filename)
+                            if os.path.exists(path):
+                                try:
+                                    winsound.PlaySound(
+                                        path,
+                                        winsound.SND_FILENAME | winsound.SND_ASYNC | winsound.SND_NODEFAULT,
+                                    )
+                                except Exception:
+                                    pass
+        finally:
+            self._close_waveout_pool(winmm_dll, channels)
+

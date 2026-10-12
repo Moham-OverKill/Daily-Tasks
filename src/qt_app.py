@@ -261,10 +261,25 @@ class DailyTasksWindow(QMainWindow):
             "message": "",
         }
         
-        # Settings Storage Paths
+        # Settings Storage Paths & Coalesced Atomic Writer State
         appdata = os.environ.get('APPDATA', os.path.expanduser('~'))
         self.settings_dir = os.path.join(appdata, 'DailyTasks')
         self.settings_path = os.path.join(self.settings_dir, "settings.json")
+        self._loading_settings = False
+        self._settings_save_lock = threading.Lock()
+        self._pending_settings_snapshot = None
+        self._settings_writer_active = False
+
+        # Clock drift / sleep-wake tracking
+        self._last_tick_wall = time.time()
+        self._last_tick_mono = time.monotonic()
+        self._wm_taskbar_created = 0
+        try:
+            self._wm_taskbar_created = int(
+                ctypes.windll.user32.RegisterWindowMessageW("TaskbarCreated")
+            )
+        except Exception:
+            self._wm_taskbar_created = 0
         
         # Connect signals
         self.prayer_sync_finished.connect(self._post_prayer_sync)
@@ -286,19 +301,40 @@ class DailyTasksWindow(QMainWindow):
         # Defer non-critical startup operations so main window displays immediately
         QTimer.singleShot(0, self._deferred_startup)
 
+    def _read_settings_dict(self):
+        """Read settings.json safely, falling back to settings.json.bak if corrupted."""
+        bak_path = self.settings_path + ".bak"
+        for candidate in (self.settings_path, bak_path):
+            if os.path.exists(candidate):
+                try:
+                    with open(candidate, 'r', encoding='utf-8') as f:
+                        data = json.load(f)
+                    if isinstance(data, dict):
+                        return data
+                except (OSError, json.JSONDecodeError, ValueError):
+                    continue
+        return None
+
     def _preload_settings(self):
         """Read lightweight user preferences before building the UI to prevent double rendering."""
+        self._loading_settings = True
         try:
-            with open(self.settings_path, 'r') as f:
-                settings = json.load(f)
+            settings = self._read_settings_dict()
+            if settings is None:
+                self.task_manager.synchronize_task_statuses()
+                self._last_opened_date = datetime.now().strftime("%Y-%m-%d")
+                return
 
-            self.dnd_enabled = settings.get('dnd_enabled', False)
-            self.prayer_mode_enabled = settings.get('prayer_mode_enabled', False)
-            self.simple_mode_enabled = settings.get('simple_mode_enabled', False)
-            self.hardcore_mode_enabled = settings.get('hardcore_mode_enabled', False)
-            self.ui_sounds_enabled = settings.get('ui_sounds_enabled', True)
-            self.ui_volume = int(settings.get('ui_volume', 80))
-            self.current_theme = settings.get('theme', 'dark')
+            self.dnd_enabled = bool(settings.get('dnd_enabled', False))
+            self.prayer_mode_enabled = bool(settings.get('prayer_mode_enabled', False))
+            self.simple_mode_enabled = bool(settings.get('simple_mode_enabled', False))
+            self.hardcore_mode_enabled = bool(settings.get('hardcore_mode_enabled', False))
+            self.ui_sounds_enabled = bool(settings.get('ui_sounds_enabled', True))
+            try:
+                self.ui_volume = max(0, min(100, int(settings.get('ui_volume', 80))))
+            except (ValueError, TypeError):
+                self.ui_volume = 80
+            self.current_theme = settings.get('theme', 'dark') or 'dark'
             self._initial_scroll_pos = settings.get('scroll_position', 0)
 
             saved_page = settings.get('active_page_id')
@@ -318,9 +354,13 @@ class DailyTasksWindow(QMainWindow):
             self.sound_manager.set_dnd(self.dnd_enabled)
             self.sound_manager.set_ui_sounds_enabled(self.ui_sounds_enabled)
             self.sound_manager.set_ui_volume(self.ui_volume)
-        except (FileNotFoundError, json.JSONDecodeError):
+        except Exception as e:
+            print(f"Preload settings warning: {e}")
             self.task_manager.synchronize_task_statuses()
             self._last_opened_date = datetime.now().strftime("%Y-%m-%d")
+        finally:
+            self._loading_settings = False
+
 
     @property
     def settings_panel(self):
@@ -444,15 +484,18 @@ class DailyTasksWindow(QMainWindow):
             self.update_manager.download_failed.connect(self._on_update_download_failed)
 
     def _deferred_startup(self):
-        """Asynchronously initialize system tray, timers, and background sync after window display"""
+        """Asynchronously initialize system tray, timers, startup registration, and background sync after window display"""
         self._update_app_icon()
         if self.tray_icon is None:
             self._setup_tray()
             
-        if not hasattr(self, 'update_timer') or self.update_timer is None:
+        if getattr(self, 'update_timer', None) is None:
             self.update_timer = QTimer(self)
+            self.update_timer.setSingleShot(True)
             self.update_timer.timeout.connect(self._update_loop)
-            self.update_timer.start(1000)
+            self._schedule_next_tick()
+
+        self._ensure_startup()
 
         if self.prayer_mode_enabled:
             self._sync_prayers_background(silent=True)
@@ -475,11 +518,13 @@ class DailyTasksWindow(QMainWindow):
                 if not raw.isNull():
                     pix = raw.scaled(128, 128, Qt.KeepAspectRatio, Qt.SmoothTransformation)
                 else:
-                    pix = raw
+                    pix = QPixmap()
+                del raw
             else:
                 pix = QPixmap()
             self._base_icon_pixmap = pix
         return pix
+
 
     def _setup_window(self):
         """Configure the main window"""
@@ -884,73 +929,12 @@ class DailyTasksWindow(QMainWindow):
             except Exception as e:
                 print(f"Centering failed: {e}")
             
-    def _load_tasks(self, animate=False, first_load=False):
-        """Load and display tasks for the active page with Partial Refresh support"""
-        tasks = self.task_manager.get_tasks(page_id=self.active_page_id)
-        tasks.sort(key=lambda x: x.get('start_time', ''))
-        
-        # 1. CLEANUP: Find and remove cards that are no longer in our task list
-        current_ids = set(t['id'] for t in tasks)
-        cards_to_remove = [tid for tid in self.task_cards if tid not in current_ids]
-        for tid in cards_to_remove:
-            card = self.task_cards.pop(tid)
-            card.stop_flashing()
-            card.stop_pulse()
-            card.deleteLater()
-            
-        # 2. UPDATE OR CREATE: Efficiently refresh the grid
-        # Clear layout first (widgets are preserved in self.task_cards)
-        while self.task_layout.count():
-            item = self.task_layout.takeAt(0)
-            if item.widget() and item.widget().objectName() == "AddTaskCard":
-                item.widget().deleteLater()
-        
-        # Always show scroll area
-        self.empty_state_label.hide()
-        self.scroll.show()
-        
-        # Restore scroll if saved
-        if hasattr(self, '_initial_scroll_pos'):
-            pos = self._initial_scroll_pos
-            del self._initial_scroll_pos
-            QTimer.singleShot(50, lambda: self.scroll.verticalScrollBar().setValue(pos))
-        
-        # 3. Dynamic Resizing (Only if count changed)
-        self._update_window_size(len(tasks) + 1, recenter=first_load)
-        
-        # Set column stretches
-        for i in range(self.cols):
-            self.task_layout.setColumnStretch(i, 1)
-        
-        # 4. Add/Update Task Cards
-        for i, task in enumerate(tasks):
-            tid = task['id']
-            if tid in self.task_cards:
-                card = self.task_cards[tid]
-                card.update_content(task)
-            else:
-                card = TaskCard(task)
-                card.set_animations_enabled(not self.simple_mode_enabled)
-                card.apply_theme(self.current_theme)
-                # BUG-05 FIX: Connect using task_id, always re-fetch from task_manager on click
-                task_id = tid
-                card.clicked.connect(lambda checked=False, _id=task_id: self._on_task_clicked_by_id(_id))
-                card.delete_requested.connect(lambda checked=False, _id=task_id: self._delete_task_by_id(_id))
-                card.edit_requested.connect(lambda checked=False, _id=task_id: self._edit_task_by_id(_id))
-                self.task_cards[tid] = card
-            
-            row = i // self.cols
-            col = i % self.cols
-            
-            # Re-add to layout (widgets are already created or updated)
-            self.task_layout.addWidget(card, row, col)
-            
-            # Apply initial pulse if just created/starting
-            if task.get('status') == 'active' and not card.is_pulsing:
-                card.start_active_pulse()
-        
-        # ── ADD TASK CARD (+) ──
-        # Always the last card in the grid, same dimensions as TaskCard
+    def _ensure_add_task_card(self):
+        """Construct the '+' AddTaskCard once and reuse it across all grid refreshes."""
+        if getattr(self, '_add_task_card', None) is not None:
+            self._apply_add_card_theme()
+            return self._add_task_card
+
         add_card = QFrame()
         add_card.setObjectName("AddTaskCard")
         add_card.setMinimumSize(240, 250)
@@ -961,19 +945,19 @@ class DailyTasksWindow(QMainWindow):
         add_card._press_t = 0.0
         add_card._hover_anim = None
         add_card._press_anim = None
-        
+
         add_card_layout = QVBoxLayout(add_card)
         add_card_layout.setContentsMargins(0, 0, 0, 0)
         add_card_layout.setAlignment(Qt.AlignCenter)
-        
+
         plus_label = QLabel("")
         plus_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         plus_label.setStyleSheet("background: transparent; border: none;")
         add_card_layout.addWidget(plus_label)
-        
+
         self._add_task_card = add_card
         self._add_task_plus_label = plus_label
-        
+
         def _paint_add_card(event, _w=add_card):
             w = _w.width()
             h = _w.height()
@@ -1046,7 +1030,7 @@ class DailyTasksWindow(QMainWindow):
 
         add_card.paintEvent = _paint_add_card
         self._apply_add_card_theme()
-        
+
         def _animate_add_card_hover(target, _w=add_card):
             if self.simple_mode_enabled:
                 _w._hover_t = float(target)
@@ -1093,7 +1077,6 @@ class DailyTasksWindow(QMainWindow):
                 _animate_add_card_press(0.0, 135, QEasingCurve.OutCubic, _w)
             QFrame.leaveEvent(_w, event)
 
-        # BUG-12 FIX: Proper left-button check + call super() for correct Qt event propagation
         def _add_card_press(event, _widget=add_card):
             if event.button() == Qt.LeftButton:
                 _animate_add_card_press(1.0, 70, QEasingCurve.OutQuad, _widget)
@@ -1110,17 +1093,97 @@ class DailyTasksWindow(QMainWindow):
         add_card.leaveEvent = _add_card_leave
         add_card.mousePressEvent = _add_card_press
         add_card.mouseReleaseEvent = _add_card_release
-        
+        return add_card
+
+    def _load_tasks(self, animate=False, first_load=False):
+        """Load and display tasks for the active page with zero-reflow delta update when order is unchanged."""
+        tasks = self.task_manager.get_tasks(page_id=self.active_page_id)
+        tasks.sort(key=lambda x: (0 if not x.get('start_time') else 1, x.get('start_time') or ''))
+
+        new_grid_order = tuple(t['id'] for t in tasks)
+
+        # Fast Delta Path: If the exact same task IDs are in the exact same grid order,
+        # update card contents in-place without tearing down or reflowing QGridLayout.
+        if (
+            not first_load
+            and getattr(self, '_last_grid_order', None) == new_grid_order
+            and getattr(self, '_add_task_card', None) is not None
+            and all(tid in self.task_cards for tid in new_grid_order)
+        ):
+            for task in tasks:
+                card = self.task_cards[task['id']]
+                card.update_content(task)
+                if task.get('status') == 'active' and not card.is_pulsing:
+                    card.start_active_pulse()
+            self._apply_add_card_theme()
+            self._update_app_icon()
+            return
+
+        # 1. CLEANUP: Find and remove cards that are no longer in our task list
+        current_ids = set(new_grid_order)
+        cards_to_remove = [tid for tid in self.task_cards if tid not in current_ids]
+        for tid in cards_to_remove:
+            card = self.task_cards.pop(tid)
+            if hasattr(card, 'cleanup'):
+                card.cleanup()
+            else:
+                card.stop_flashing()
+                card.stop_pulse()
+            card.deleteLater()
+
+        # 2. Detach items from layout (widgets are preserved in self.task_cards & self._add_task_card)
+        while self.task_layout.count():
+            self.task_layout.takeAt(0)
+
+        # Always show scroll area
+        self.empty_state_label.hide()
+        self.scroll.show()
+
+        # Restore scroll if saved
+        if hasattr(self, '_initial_scroll_pos'):
+            pos = self._initial_scroll_pos
+            del self._initial_scroll_pos
+            QTimer.singleShot(50, lambda: self.scroll.verticalScrollBar().setValue(pos))
+
+        # 3. Dynamic Resizing
+        self._update_window_size(len(tasks) + 1, recenter=first_load)
+
+        # Set column stretches
+        for i in range(self.cols):
+            self.task_layout.setColumnStretch(i, 1)
+
+        # 4. Add/Update Task Cards
+        for i, task in enumerate(tasks):
+            tid = task['id']
+            if tid in self.task_cards:
+                card = self.task_cards[tid]
+                card.update_content(task)
+            else:
+                card = TaskCard(task)
+                card.set_animations_enabled(not self.simple_mode_enabled)
+                card.apply_theme(self.current_theme)
+                task_id = tid
+                card.clicked.connect(lambda checked=False, _id=task_id: self._on_task_clicked_by_id(_id))
+                card.delete_requested.connect(lambda checked=False, _id=task_id: self._delete_task_by_id(_id))
+                card.edit_requested.connect(lambda checked=False, _id=task_id: self._edit_task_by_id(_id))
+                self.task_cards[tid] = card
+
+            row = i // self.cols
+            col = i % self.cols
+            self.task_layout.addWidget(card, row, col)
+
+            if task.get('status') == 'active' and not card.is_pulsing:
+                card.start_active_pulse()
+
+        # 5. Reuse singleton AddTaskCard (+) at the end of the grid
+        add_card = self._ensure_add_task_card()
         total_items = len(tasks)
         add_row = total_items // self.cols
         add_col = total_items % self.cols
         self.task_layout.addWidget(add_card, add_row, add_col)
-                
+
+        self._last_grid_order = new_grid_order
         self._update_app_icon()
-        # State consistency is now handled by:
-        # 1. add_task() on creation
-        # 2. _update_loop() every second
-        # NOT here to prevent recursion and race conditions
 
     def _apply_add_card_theme(self):
         """Trigger repaint of AddTaskCard when theme or hover state updates."""
@@ -1150,18 +1213,29 @@ class DailyTasksWindow(QMainWindow):
             return  # Ghost task - no action
         
         # Parse task times via O(1) cached integer math
-        s_secs = _parse_hhmm_to_secs(task.get('start_time', '00:00'))
-        e_secs = _parse_hhmm_to_secs(task.get('end_time', '23:59'))
+        start_str = task.get('start_time')
+        end_str = task.get('end_time')
         now_secs = now.hour * 3600 + now.minute * 60 + now.second
-        if s_secs is not None and e_secs is not None:
-            if e_secs < s_secs:
-                if now.hour < 12:
-                    s_secs -= 86400
-                else:
-                    e_secs += 86400
-            is_within_time = s_secs <= now_secs <= e_secs
-        else:
+        if not start_str:
             is_within_time = True
+        elif not end_str:
+            try:
+                s_secs = _parse_hhmm_to_secs(start_str)
+                is_within_time = now_secs >= s_secs
+            except ValueError:
+                is_within_time = True
+        else:
+            try:
+                s_secs = _parse_hhmm_to_secs(start_str)
+                e_secs = _parse_hhmm_to_secs(end_str)
+                if e_secs < s_secs:
+                    if now.hour < 12:
+                        s_secs -= 86400
+                    else:
+                        e_secs += 86400
+                is_within_time = s_secs <= now_secs <= e_secs
+            except ValueError:
+                is_within_time = True
         
         # === STATE MACHINE TRANSITIONS ===
         new_status = None
@@ -1703,7 +1777,9 @@ class DailyTasksWindow(QMainWindow):
         self._vol_save_timer.start(250)
         
     def _sync_prayers_background(self, silent=False):
-        """Synchronize prayer times in a background worker thread."""
+        """Synchronize prayer times in a background worker thread (deduplicated)."""
+        if getattr(self, '_prayer_loading', False):
+            return
         self._silent_prayer_sync = silent
         self._prayer_loading = True
         if self._settings_panel is not None:
@@ -1718,6 +1794,7 @@ class DailyTasksWindow(QMainWindow):
                 self.prayer_sync_finished.emit(False)
 
         threading.Thread(target=sync, daemon=True).start()
+
 
     def _toggle_prayer_mode(self, enabled):
         """Toggle prayer times feature"""
@@ -1798,7 +1875,7 @@ class DailyTasksWindow(QMainWindow):
             if self.dnd_enabled:
                 continue
 
-            if old_status == 'pending' and new_status == 'active':
+            if old_status == 'pending' and new_status == 'active' and task.get('start_time'):
                 self._send_notification(f"Task Started: {task['name']}", "It's time!")
                 self.sound_manager.play_start()
             elif old_status == 'active' and new_status == 'failed':
@@ -1821,8 +1898,19 @@ class DailyTasksWindow(QMainWindow):
 
             has_active = True
 
-            s_secs = _parse_hhmm_to_secs(task.get('start_time', ''))
-            e_secs = _parse_hhmm_to_secs(task.get('end_time', ''))
+            start_str = task.get('start_time')
+            end_str = task.get('end_time')
+            if start_str and end_str:
+                try:
+                    s_secs = _parse_hhmm_to_secs(start_str)
+                    e_secs = _parse_hhmm_to_secs(end_str)
+                except ValueError:
+                    s_secs = None
+                    e_secs = None
+            else:
+                s_secs = None
+                e_secs = None
+
             if s_secs is not None and e_secs is not None:
                 if e_secs < s_secs:
                     if now.hour < 12:
@@ -1843,6 +1931,10 @@ class DailyTasksWindow(QMainWindow):
                     if tid in self.task_cards:
                         self.task_cards[tid].stop_flashing()
                         self.task_cards[tid].start_active_pulse()
+            else:
+                if tid in self.task_cards:
+                    self.task_cards[tid].stop_flashing()
+                    self.task_cards[tid].start_active_pulse()
 
         # 3. Batch flash logic: flash once when first active task appears
         if has_active:
@@ -1878,34 +1970,119 @@ class DailyTasksWindow(QMainWindow):
 
         self._update_app_icon()
 
-    def _update_loop(self):
-        """Periodic update for task statuses (every second)"""
-        now = datetime.now()
-        today_str = now.strftime("%Y-%m-%d")
-
-        # 1. Daily Reset Check
-        if today_str != self.current_date_str:
-            self.current_date_str = today_str
-            self._flashed_urgent_tasks.clear()
-            self.task_manager.reset_daily_tasks()
-            self._load_tasks()
+    def _schedule_next_tick(self):
+        """Schedule singleShot update_timer for the exact next minute boundary (eliminates 1s polling)."""
+        if getattr(self, 'update_timer', None) is None:
             return
+        now = datetime.now()
+        ms_into_minute = (now.second * 1000) + (now.microsecond // 1000)
+        delay_ms = max(1000, min(60050, 60025 - ms_into_minute))
+        self.update_timer.start(int(delay_ms))
 
-        # 2. BUG-01 / OPT-01 FIX: Single-pass sync — replaces the previous
-        # double-scan (synchronize_task_statuses + _check_upcoming_tasks).
-        # synchronize_task_statuses now returns the exact transitions so
-        # _monitor_task_states can act on them without re-computing statuses.
-        sync_modified, changes = self.task_manager.synchronize_task_statuses()
+    def _update_loop(self):
+        """Precision minute-boundary update for task statuses with sleep/wake and clock-jump resilience."""
+        try:
+            now_wall = time.time()
+            now_mono = time.monotonic()
+            wall_delta = now_wall - getattr(self, '_last_tick_wall', now_wall)
+            mono_delta = now_mono - getattr(self, '_last_tick_mono', now_mono)
+            self._last_tick_wall = now_wall
+            self._last_tick_mono = now_mono
 
-        # 3. Handle sound / notification / flash side-effects for transitions
-        self._monitor_task_states(changes)
+            # Detect system standby/hibernation wake, manual clock change, or DST/timezone shift
+            if wall_delta > 75.0 or wall_delta < -1.0 or abs(wall_delta - mono_delta) > 5.0:
+                self._on_system_resume_or_time_change()
+                return
 
-        # 4. BUG-04 / OPT-04 FIX: Incremental card refresh — only rebuild grid
-        # when tasks are structurally added/removed (handled in _load_tasks callers).
-        # Status-only changes are reflected via card.update_content() exclusively.
-        if sync_modified:
-            changed_ids = {str(t['id']) for t, _, _ in changes}
-            self._update_cards_incremental(changed_ids)
+            now = datetime.now()
+            today_str = now.strftime("%Y-%m-%d")
+
+            # 1. Daily Reset Check
+            if today_str != self.current_date_str:
+                self.current_date_str = today_str
+                self._last_opened_date = today_str
+                self._flashed_urgent_tasks.clear()
+                self.task_manager.reset_daily_tasks()
+                if self.prayer_mode_enabled:
+                    self._sync_prayers_background(silent=True)
+                self._load_tasks()
+                self.save_settings()
+                return
+
+            # 2. Single-pass status synchronization
+            sync_modified, changes = self.task_manager.synchronize_task_statuses()
+
+            # 3. Handle sound / notification / flash side-effects for transitions
+            self._monitor_task_states(changes)
+
+            # 4. Incremental card refresh
+            if sync_modified:
+                changed_ids = {str(t['id']) for t, _, _ in changes}
+                self._update_cards_incremental(changed_ids)
+        except Exception as e:
+            print(f"Update loop recovery warning: {e}")
+        finally:
+            self._schedule_next_tick()
+
+    def _on_system_resume_or_time_change(self):
+        """Recover cleanly from Windows Sleep/Hibernate or system clock/timezone/DST changes."""
+        try:
+            self._last_tick_wall = time.time()
+            self._last_tick_mono = time.monotonic()
+
+            # Reconnect audio output handles in case audio endpoint reset across sleep
+            if hasattr(self, 'sound_manager') and self.sound_manager is not None:
+                self.sound_manager.reset_audio_devices()
+
+            today_str = datetime.now().strftime("%Y-%m-%d")
+            if today_str != self.current_date_str:
+                self.current_date_str = today_str
+                self._last_opened_date = today_str
+                self._flashed_urgent_tasks.clear()
+                self.task_manager.reset_daily_tasks()
+                if self.prayer_mode_enabled:
+                    self._sync_prayers_background(silent=True)
+                self._load_tasks()
+                self.save_settings()
+            else:
+                sync_modified, changes = self.task_manager.synchronize_task_statuses()
+                self._monitor_task_states(changes)
+                self._load_tasks()
+                self._update_app_icon()
+        except Exception as e:
+            print(f"System resume recovery warning: {e}")
+        finally:
+            self._schedule_next_tick()
+
+    def _re_register_tray_icon(self):
+        """Re-register system tray icon when Windows Explorer (explorer.exe) restarts."""
+        try:
+            if self.tray_icon is not None:
+                self.tray_icon.hide()
+                self.tray_icon.show()
+                self._last_badge_cache_key = None
+                self._update_app_icon()
+        except Exception as e:
+            print(f"Tray re-registration warning: {e}")
+
+    def nativeEvent(self, eventType, message):
+        """Intercept Win32 power-resume, time-change, and Explorer taskbar-recreated messages."""
+        try:
+            if message:
+                msg = ctypes.wintypes.MSG.from_address(int(message))
+                # WM_POWERBROADCAST (0x0218): PBT_APMRESUMECRITICAL(0x06), PBT_APMRESUMESUSPEND(0x07), PBT_APMRESUMEAUTOMATIC(0x12)
+                if msg.message == 0x0218 and msg.wParam in (0x0006, 0x0007, 0x0012):
+                    QTimer.singleShot(250, self._on_system_resume_or_time_change)
+                # WM_TIMECHANGE (0x001E): System clock, DST, or timezone changed
+                elif msg.message == 0x001E:
+                    QTimer.singleShot(150, self._on_system_resume_or_time_change)
+                # TaskbarCreated: explorer.exe restarted
+                elif self._wm_taskbar_created and msg.message == self._wm_taskbar_created:
+                    QTimer.singleShot(300, self._re_register_tray_icon)
+        except Exception:
+            pass
+        return super().nativeEvent(eventType, message)
+
 
     def _send_notification(self, title, message):
         """Send Windows notification"""
@@ -1987,6 +2164,18 @@ class DailyTasksWindow(QMainWindow):
                     # Only restart if not already running (start() handles restart safely)
                     self.particles.start(fps=60)
         super().changeEvent(event)
+
+    def hideEvent(self, event):
+        """Immediately halt background particle timer when window is hidden to tray."""
+        if hasattr(self, 'particles') and self.particles is not None:
+            self.particles.stop()
+        super().hideEvent(event)
+
+    def showEvent(self, event):
+        """Resume particles when window is shown and active."""
+        if hasattr(self, 'particles') and self.particles is not None and not self.isMinimized():
+            self.particles.start(fps=60)
+        super().showEvent(event)
             
     def _update_app_icon(self):
         """Update app icon with badge count (debounced)"""
@@ -2068,22 +2257,27 @@ class DailyTasksWindow(QMainWindow):
             print(f"Badge update failed: {e}")
             
     def load_settings(self):
-        """Load user preferences"""
+        """Load user preferences safely with re-entrancy guard and backup fallback."""
         appdata = os.environ.get('APPDATA', os.path.expanduser('~'))
         self.settings_dir = os.path.join(appdata, 'DailyTasks')
         self.settings_path = os.path.join(self.settings_dir, "settings.json")
         
+        self._loading_settings = True
         try:
-            with open(self.settings_path, 'r') as f:
-                settings = json.load(f)
+            settings = self._read_settings_dict()
+            if settings is None:
+                return
                 
-            dnd = settings.get('dnd_enabled', False)
-            prayer = settings.get('prayer_mode_enabled', False)
-            simple = settings.get('simple_mode_enabled', False)
-            hardcore = settings.get('hardcore_mode_enabled', False)
-            ui_sounds = settings.get('ui_sounds_enabled', True)
-            ui_vol = int(settings.get('ui_volume', 80))
-            theme = settings.get('theme', 'dark')
+            dnd = bool(settings.get('dnd_enabled', False))
+            prayer = bool(settings.get('prayer_mode_enabled', False))
+            simple = bool(settings.get('simple_mode_enabled', False))
+            hardcore = bool(settings.get('hardcore_mode_enabled', False))
+            ui_sounds = bool(settings.get('ui_sounds_enabled', True))
+            try:
+                ui_vol = max(0, min(100, int(settings.get('ui_volume', 80))))
+            except (ValueError, TypeError):
+                ui_vol = 80
+            theme = settings.get('theme', 'dark') or 'dark'
             
             self.dnd_enabled = dnd
             self.prayer_mode_enabled = prayer
@@ -2115,7 +2309,6 @@ class DailyTasksWindow(QMainWindow):
             self.task_manager.synchronize_task_statuses()
                 
             self._last_opened_date = today_str
-            self.save_settings()
             
             if dnd:
                 self._toggle_dnd(True)
@@ -2128,9 +2321,11 @@ class DailyTasksWindow(QMainWindow):
             else:
                 self.task_manager.remove_synced_tasks()
                 self._load_tasks()
-                
-        except (FileNotFoundError, json.JSONDecodeError):
-            pass
+        except Exception as e:
+            print(f"Load settings warning: {e}")
+        finally:
+            self._loading_settings = False
+        self.save_settings()
             
     def _update_settings_pos(self):
         """Anchor settings panel above the settings button (Robust Global Mapping)"""
@@ -2272,7 +2467,7 @@ class DailyTasksWindow(QMainWindow):
         self.title_bar.apply_theme(self.current_theme)
 
     def _ensure_startup(self):
-        """Enforce startup registry key"""
+        """Enforce startup registry key and clean up any stale legacy key."""
         try:
             import winreg
             key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Run", 0, winreg.KEY_SET_VALUE)
@@ -2282,21 +2477,70 @@ class DailyTasksWindow(QMainWindow):
                 exe_path = sys.executable
                 cmd = f'"{exe_path}"'
             else:
-                # During dev: pythonw.exe start.py
-                # Use sys.argv[0] to find script
                 script = os.path.abspath(sys.argv[0])
-                # Ensure we use pythonw if running via python (though pythonw is preferred for GUI)
                 py_exe = sys.executable.replace("python.exe", "pythonw.exe")
-                if not os.path.exists(py_exe): py_exe = sys.executable
+                if not os.path.exists(py_exe):
+                    py_exe = sys.executable
                 cmd = f'"{py_exe}" "{script}"'
                 
             winreg.SetValueEx(key, app_name, 0, winreg.REG_SZ, cmd)
+            # Remove legacy "DailyTasks" (no space) key if present so Windows doesn't launch duplicate/missing paths
+            try:
+                winreg.DeleteValue(key, "DailyTasks")
+            except OSError:
+                pass
             winreg.CloseKey(key)
         except Exception as e:
             print(f"Startup registration failed: {e}")
 
+    def _flush_settings_worker(self):
+        """Single serialized worker thread that writes coalesced settings snapshots atomically."""
+        import shutil
+        while True:
+            with self._settings_save_lock:
+                snapshot = self._pending_settings_snapshot
+                self._pending_settings_snapshot = None
+                if snapshot is None:
+                    self._settings_writer_active = False
+                    return
+
+            tmp_path = f"{self.settings_path}.{threading.get_ident()}.tmp"
+            bak_path = self.settings_path + ".bak"
+            try:
+                os.makedirs(self.settings_dir, exist_ok=True)
+                with open(tmp_path, 'w', encoding='utf-8') as f:
+                    json.dump(snapshot, f, separators=(',', ':'))
+                    f.flush()
+                    try:
+                        os.fsync(f.fileno())
+                    except OSError:
+                        pass
+                if os.path.exists(self.settings_path):
+                    try:
+                        if os.path.getsize(self.settings_path) > 2:
+                            shutil.copy2(self.settings_path, bak_path)
+                    except OSError:
+                        pass
+                for attempt in range(4):
+                    try:
+                        os.replace(tmp_path, self.settings_path)
+                        break
+                    except PermissionError:
+                        if attempt == 3:
+                            raise
+                        time.sleep(0.015)
+            except Exception as e:
+                print(f"Failed to save settings: {e}")
+            finally:
+                if os.path.exists(tmp_path):
+                    try:
+                        os.remove(tmp_path)
+                    except OSError:
+                        pass
+
+
     def save_settings(self):
-        """Save user preferences (OPT-06: writes asynchronously to avoid disk I/O on main thread)"""
+        """Save user preferences using a coalesced atomic writer (no thread accumulation)."""
         if getattr(self, '_loading_settings', False):
             return
 
@@ -2306,7 +2550,11 @@ class DailyTasksWindow(QMainWindow):
                 if self._settings_panel is not None
                 else self.prayer_mode_enabled
             )
-            # Gather all values on the main thread (UI access must stay on main thread)
+            scroll_val = (
+                self.scroll.verticalScrollBar().value()
+                if hasattr(self, 'scroll') and self.scroll is not None
+                else 0
+            )
             settings = {
                 'dnd_enabled': self.dnd_enabled,
                 'simple_mode_enabled': self.simple_mode_enabled,
@@ -2315,23 +2563,16 @@ class DailyTasksWindow(QMainWindow):
                 'ui_sounds_enabled': getattr(self, 'ui_sounds_enabled', True),
                 'ui_volume': getattr(self, 'ui_volume', 80),
                 'theme': self.current_theme,
-                'scroll_position': self.scroll.verticalScrollBar().value(),
+                'scroll_position': scroll_val,
                 'last_opened_date': getattr(self, '_last_opened_date', datetime.now().strftime("%Y-%m-%d")),
                 'active_page_id': self.active_page_id
             }
-            settings_dir = self.settings_dir
-            settings_path = self.settings_path
 
-            # Write in background to avoid blocking the UI thread
-            def _write():
-                try:
-                    os.makedirs(settings_dir, exist_ok=True)
-                    with open(settings_path, 'w') as f:
-                        json.dump(settings, f, separators=(',', ':'))
-                except Exception as e:
-                    print(f"Failed to save settings: {e}")
-
-            threading.Thread(target=_write, daemon=True).start()
+            with self._settings_save_lock:
+                self._pending_settings_snapshot = settings
+                if not self._settings_writer_active:
+                    self._settings_writer_active = True
+                    threading.Thread(target=self._flush_settings_worker, daemon=True).start()
         except Exception as e:
             print(f"Failed to prepare settings: {e}")
             
@@ -2473,11 +2714,19 @@ class DailyTasksWindow(QMainWindow):
             QApplication.quit()
         
     def _force_quit(self):
-        """Clean shutdown"""
-        if hasattr(self, 'particles'):
+        """Clean shutdown releasing timers, audio handles, and tray icon."""
+        try:
+            self.save_settings()
+        except Exception:
+            pass
+        if hasattr(self, 'update_timer') and self.update_timer is not None:
+            self.update_timer.stop()
+        if hasattr(self, 'particles') and self.particles is not None:
             self.particles.stop()  # Stop particle timer to prevent background CPU burn
+        if hasattr(self, 'sound_manager') and self.sound_manager is not None:
+            self.sound_manager.close()
         if self.tray_icon:
-            self.tray_icon.hide() # Remove icon from tray
+            self.tray_icon.hide()  # Remove icon from tray
         QApplication.quit()
 
 
@@ -2542,8 +2791,33 @@ class GlobalMenuFilter(QObject):
                 
         return False
 
+def _install_resilient_excepthook():
+    """Install a non-fatal exception hook so transient callback errors are logged without killing the tray app."""
+    def _hook(exc_type, exc_value, exc_tb):
+        if issubclass(exc_type, KeyboardInterrupt):
+            sys.__excepthook__(exc_type, exc_value, exc_tb)
+            return
+        try:
+            import traceback
+            appdata = os.environ.get('APPDATA', os.path.expanduser('~'))
+            log_dir = os.path.join(appdata, 'DailyTasks')
+            os.makedirs(log_dir, exist_ok=True)
+            log_file = os.path.join(log_dir, 'crash_recovery.log')
+            with open(log_file, 'a', encoding='utf-8') as f:
+                f.write(f"\n--- {datetime.now().isoformat()} ---\n")
+                traceback.print_exception(exc_type, exc_value, exc_tb, file=f)
+        except Exception:
+            pass
+        try:
+            sys.__excepthook__(exc_type, exc_value, exc_tb)
+        except Exception:
+            pass
+    sys.excepthook = _hook
+
+
 def run_qt_app():
     """Entry point for the Qt version of the app"""
+    _install_resilient_excepthook()
     
     # -------------------------------------------------------------
     # Dynamic Extreme Resolution Scaling Engine
@@ -2613,3 +2887,4 @@ def run_qt_app():
 
 if __name__ == "__main__":
     run_qt_app()
+
