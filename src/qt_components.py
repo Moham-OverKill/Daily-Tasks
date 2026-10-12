@@ -2751,6 +2751,7 @@ class SettingsPanel(QFrame):
     dnd_toggled = Signal(bool)
     prayer_mode_toggled = Signal(bool)
     simple_mode_toggled = Signal(bool)
+    hide_non_today_toggled = Signal(bool)
     hardcore_mode_toggled = Signal(bool)
     ui_sounds_toggled = Signal(bool)
     ui_volume_changed = Signal(int)
@@ -2758,8 +2759,8 @@ class SettingsPanel(QFrame):
     check_updates_clicked = Signal()
     install_update_clicked = Signal(str, str)  # (version, download_url)
 
-    _EXPANDED_HEIGHT = 488
-    _COLLAPSED_HEIGHT = 448
+    _EXPANDED_HEIGHT = 496
+    _COLLAPSED_HEIGHT = 456
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -2779,8 +2780,8 @@ class SettingsPanel(QFrame):
         
     def _setup_ui(self):
         layout = QVBoxLayout(self)
-        layout.setSpacing(8)
-        layout.setContentsMargins(24, 18, 24, 16)
+        layout.setSpacing(6)
+        layout.setContentsMargins(24, 16, 24, 14)
         
         # Header with close button
         header = QHBoxLayout()
@@ -2834,6 +2835,13 @@ class SettingsPanel(QFrame):
         )
         self.simple_checkbox.toggled.connect(self.simple_mode_toggled.emit)
         layout.addWidget(self.simple_checkbox)
+
+        self.hide_non_today_checkbox = self._create_checkbox(
+            "Today's Tasks Only",
+            "Hides tasks scheduled for other days (e.g., tomorrow or in X days)."
+        )
+        self.hide_non_today_checkbox.toggled.connect(self.hide_non_today_toggled.emit)
+        layout.addWidget(self.hide_non_today_checkbox)
         
         # Separator between Visual & Display and Workflow & Behavior
         self.sep = QFrame()
@@ -3092,7 +3100,7 @@ class SettingsPanel(QFrame):
         container.setStyleSheet("background: transparent;")
         
         layout = QHBoxLayout(container)
-        layout.setContentsMargins(0, 4, 0, 4)
+        layout.setContentsMargins(0, 3, 0, 3)
         layout.setSpacing(12)
         
         # Checkbox button (styled as square)
@@ -3123,12 +3131,13 @@ class SettingsPanel(QFrame):
         
         return container
         
-    def set_values(self, dnd, prayer, simple, hardcore, ui_sounds=True, ui_volume=80):
+    def set_values(self, dnd, prayer, simple, hardcore, ui_sounds=True, ui_volume=80, hide_non_today=False):
         """Set checkbox and slider states without triggering signals"""
         for cb in (
             self.dnd_checkbox.checkbox,
             self.prayer_checkbox.checkbox,
             self.simple_checkbox.checkbox,
+            self.hide_non_today_checkbox.checkbox,
             self.hardcore_checkbox.checkbox,
             self.ui_sounds_checkbox.checkbox,
         ):
@@ -3138,6 +3147,7 @@ class SettingsPanel(QFrame):
         self.dnd_checkbox.checkbox.setChecked(dnd)
         self.prayer_checkbox.checkbox.setChecked(prayer)
         self.simple_checkbox.checkbox.setChecked(simple)
+        self.hide_non_today_checkbox.checkbox.setChecked(hide_non_today)
         self.hardcore_checkbox.checkbox.setChecked(hardcore)
         self.ui_sounds_checkbox.checkbox.setChecked(ui_sounds)
         vol_int = max(0, min(100, int(round(ui_volume * 100)) if isinstance(ui_volume, float) and ui_volume <= 1.0 else int(ui_volume)))
@@ -3148,6 +3158,7 @@ class SettingsPanel(QFrame):
             self.dnd_checkbox.checkbox,
             self.prayer_checkbox.checkbox,
             self.simple_checkbox.checkbox,
+            self.hide_non_today_checkbox.checkbox,
             self.hardcore_checkbox.checkbox,
             self.ui_sounds_checkbox.checkbox,
         ):
@@ -3157,6 +3168,7 @@ class SettingsPanel(QFrame):
         self._update_checkbox_visual(self.dnd_checkbox.checkbox, dnd)
         self._update_checkbox_visual(self.prayer_checkbox.checkbox, prayer)
         self._update_checkbox_visual(self.simple_checkbox.checkbox, simple)
+        self._update_checkbox_visual(self.hide_non_today_checkbox.checkbox, hide_non_today)
         self._update_checkbox_visual(self.hardcore_checkbox.checkbox, hardcore)
         self._update_checkbox_visual(self.ui_sounds_checkbox.checkbox, ui_sounds)
         self._update_volume_visibility(animate=False)
@@ -3308,6 +3320,7 @@ class SettingsPanel(QFrame):
             self.dnd_checkbox,
             self.prayer_checkbox,
             self.simple_checkbox,
+            self.hide_non_today_checkbox,
             self.hardcore_checkbox,
             self.ui_sounds_checkbox,
         ]
