@@ -198,7 +198,7 @@ class UpdateManager(QObject):
     up_to_date = Signal(str)                     # current_version
     update_available = Signal(str, str, str)     # latest_version, asset_download_url, release_html_url
     check_failed = Signal(str)                   # error_message
-    download_started = Signal()
+    download_started = Signal(str)               # version being downloaded
     download_progress = Signal(int)              # 0..100
     download_finished = Signal(str)              # local_installer_path
     download_failed = Signal(str)                # error_message
@@ -276,7 +276,7 @@ class UpdateManager(QObject):
 
         threading.Thread(target=_worker, daemon=True).start()
 
-    def download_and_install(self, download_url: str = "", expected_version: str = ""):
+    def download_and_install(self, download_url: str = "", version: str = "", expected_version: str = ""):
         """
         Stream DailyTasksSetup.exe to %TEMP%\\DailyTasksUpdate\\DailyTasksSetup.exe,
         verify PE header ('MZ'), and launch the silent upgrade.
@@ -285,6 +285,7 @@ class UpdateManager(QObject):
             return
 
         target_url = download_url or self.download_url
+        target_ver = version or expected_version or self.latest_version or APP_VERSION
         if not target_url:
             # If the release has no .exe attached, open the release page in browser
             try:
@@ -295,7 +296,7 @@ class UpdateManager(QObject):
             return
 
         self._downloading = True
-        self.download_started.emit()
+        self.download_started.emit(target_ver)
         self.download_progress.emit(0)
 
         def _dl_worker():

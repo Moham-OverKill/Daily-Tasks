@@ -18,30 +18,41 @@ class TestUIAppLaunch(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        # Force offscreen QPA platform for headless GUI verification
+        # Force offscreen QPA platform and isolated temp APPDATA for headless GUI verification
+        import tempfile
         os.environ["QT_QPA_PLATFORM"] = "offscreen"
+        cls._orig_appdata = os.environ.get("APPDATA")
+        cls._temp_appdata = tempfile.mkdtemp(prefix="dailytasks_test_")
+        os.environ["APPDATA"] = cls._temp_appdata
+        import src.task_manager as tm_mod
+        cls._orig_data_file = tm_mod.DATA_FILE
+        tm_mod.DATA_FILE = tm_mod.get_data_file_path()
         cls.app = QApplication.instance() or QApplication(sys.argv)
-        appdata = os.environ.get('APPDATA', os.path.expanduser('~'))
-        cls._settings_path = os.path.join(appdata, 'DailyTasks', 'settings.json')
-        cls._backup_settings = None
-        if os.path.exists(cls._settings_path):
-            with open(cls._settings_path, 'rb') as f:
-                cls._backup_settings = f.read()
 
     @classmethod
     def tearDownClass(cls):
-        if cls._backup_settings is not None:
-            import time
-            time.sleep(0.05)
-            with open(cls._settings_path, 'wb') as f:
-                f.write(cls._backup_settings)
+        import shutil
+        import time
+        import src.task_manager as tm_mod
+        time.sleep(0.05)
+        tm_mod.DATA_FILE = cls._orig_data_file
+        if cls._orig_appdata is not None:
+            os.environ["APPDATA"] = cls._orig_appdata
+        shutil.rmtree(cls._temp_appdata, ignore_errors=True)
 
     def setUp(self):
         self.window = DailyTasksWindow()
 
     def tearDown(self):
         if hasattr(self, 'window') and self.window:
+            if hasattr(self.window, 'update_timer') and self.window.update_timer is not None:
+                self.window.update_timer.stop()
+            if hasattr(self.window, 'particles') and self.window.particles is not None:
+                self.window.particles.stop()
+            if hasattr(self.window, 'sound_manager') and self.window.sound_manager is not None:
+                self.window.sound_manager.close()
             self.window.close()
+
 
     def test_app_initialization(self):
         """Verify window initializes cleanly with title and layout."""
@@ -402,7 +413,7 @@ class TestUIAppLaunch(unittest.TestCase):
         from src.qt_components import THEME_OPTIONS
 
         # 1. Verify semantic version parsing and comparison
-        self.assertEqual(APP_VERSION, "1.3.0")
+        self.assertEqual(APP_VERSION, "1.4.0")
         self.assertEqual(parse_version("v1.3.0"), (1, 3, 0))
         self.assertEqual(parse_version("1.2"), (1, 2, 0))
         self.assertEqual(parse_version("v2.0.1-beta"), (2, 0, 1))
@@ -452,9 +463,330 @@ class TestUIAppLaunch(unittest.TestCase):
             panel.apply_theme(theme_key)
             panel.grab()
 
+    def test_optional_start_end_time_toggles(self):
+        """Verify optional Start/End time toggles (default OFF for new tasks), All-Day tasks, Start-Only tasks, and Share ID encoding."""
+        from datetime import datetime, timedelta
+        from src.qt_components import AddTaskDialog, TaskCard
+        from src.constants import ICON_CATEGORIES
+        from src import share_handler
+
+        # 1. New task dialog must default both Start and End toggles to OFF
+        new_dlg = AddTaskDialog(None, icon_categories=ICON_CATEGORIES, theme=self.window.current_theme)
+        self.assertFalse(new_dlg.start_toggle.isChecked())
+        self.assertFalse(new_dlg.end_toggle.isChecked())
+        self.assertFalse(new_dlg.end_toggle.isEnabled())
+        self.assertFalse(new_dlg.start_picker_widget.isEnabled())
+        self.assertFalse(new_dlg.end_picker_widget.isEnabled())
+        self.assertEqual(new_dlg.start_toggle.text(), "OFF")
+        self.assertEqual(new_dlg.end_toggle.text(), "OFF")
+
+        new_dlg.name_input.setText("All Day Task")
+        self.assertTrue(new_dlg.save_btn.isEnabled())
+        data_all_day = new_dlg.get_task_data()
+        self.assertIsNone(data_all_day['start_time'])
+        self.assertIsNone(data_all_day['end_time'])
+
+        # 2. Toggling Start ON enables End toggle (which remains OFF until toggled)
+        new_dlg.start_toggle.setChecked(True)
+        self.assertTrue(new_dlg.start_toggle.isChecked())
+        self.assertEqual(new_dlg.start_toggle.text(), "ON")
+        self.assertTrue(new_dlg.start_picker_widget.isEnabled())
+        self.assertTrue(new_dlg.end_toggle.isEnabled())
+        self.assertFalse(new_dlg.end_toggle.isChecked())
+        self.assertFalse(new_dlg.end_picker_widget.isEnabled())
+
+        new_dlg.start_hour.setText("09")
+        new_dlg.start_min.setText("30")
+        new_dlg.start_ampm.setText("AM")
+        new_dlg._validate_form()
+        self.assertTrue(new_dlg.save_btn.isEnabled())
+        data_start_only = new_dlg.get_task_data()
+        self.assertEqual(data_start_only['start_time'], "09:30")
+        self.assertIsNone(data_start_only['end_time'])
+
+        # 3. Toggling End ON enables End picker; toggling Start back OFF resets and disables End
+        new_dlg.end_toggle.setChecked(True)
+        self.assertTrue(new_dlg.end_picker_widget.isEnabled())
+        new_dlg.end_hour.setText("11")
+        new_dlg.end_min.setText("00")
+        new_dlg.end_ampm.setText("AM")
+        new_dlg._validate_form()
+        data_both = new_dlg.get_task_data()
+        self.assertEqual(data_both['start_time'], "09:30")
+        self.assertEqual(data_both['end_time'], "11:00")
+
+        new_dlg.start_toggle.setChecked(False)
+        self.assertFalse(new_dlg.end_toggle.isChecked())
+        self.assertFalse(new_dlg.end_toggle.isEnabled())
+        self.assertFalse(new_dlg.start_picker_widget.isEnabled())
+        self.assertFalse(new_dlg.end_picker_widget.isEnabled())
+        new_dlg.deleteLater()
+
+        # 4. Verify TaskCard time_label formatting for All Day, Start-Only, and Full Window
+        card_all_day = TaskCard({
+            'id': 'c-all-day', 'name': 'All Day', 'start_time': None, 'end_time': None,
+            'status': 'active', 'repeat_days': [0, 1, 2, 3, 4, 5, 6]
+        })
+        self.assertEqual(card_all_day.time_label.text(), "All Day")
+
+        card_start_only = TaskCard({
+            'id': 'c-start-only', 'name': 'Start Only', 'start_time': '14:15', 'end_time': None,
+            'status': 'active', 'repeat_days': [0, 1, 2, 3, 4, 5, 6]
+        })
+        self.assertEqual(card_start_only.time_label.text(), "Starts 2:15 PM")
+        card_all_day.deleteLater()
+        card_start_only.deleteLater()
+
+        # 5. Verify TaskManager state transitions and click/reset behavior
+        tm = self.window.task_manager
+        t_all_day = tm.add_task("All Day Test", None, None, "📝", repeat_days=[0, 1, 2, 3, 4, 5, 6], page_id=self.window.active_page_id)
+        self.assertEqual(t_all_day['status'], 'active')
+
+        # Clicking active All-Day task -> done; clicking again -> active (even in Hardcore Mode)
+        self.window.hardcore_mode_enabled = True
+        self.window._on_task_clicked(t_all_day)
+        self.assertEqual(t_all_day['status'], 'done')
+        self.window._on_task_clicked(t_all_day)
+        self.assertEqual(t_all_day['status'], 'active')
+
+        # Start-only task in the past -> immediately active and never fails
+        past_dt = datetime.now() - timedelta(minutes=5)
+        past_str = past_dt.strftime("%H:%M")
+        t_start_only = tm.add_task("Start Only Past", past_str, None, "📝", repeat_days=[0, 1, 2, 3, 4, 5, 6], page_id=self.window.active_page_id)
+        if past_dt.date() == datetime.now().date():
+            self.assertEqual(t_start_only['status'], 'active')
+            tm.synchronize_task_statuses()
+            self.assertEqual(t_start_only['status'], 'active')
+
+        # Daily reset resets yesterday's completed tasks and re-evaluates consistency
+        tm.update_task_status(t_all_day['id'], 'done')
+        t_all_day['completed_at'] = (datetime.now() - timedelta(days=1)).isoformat()
+        tm.update_task_status(t_start_only['id'], 'done')
+        t_start_only['completed_at'] = (datetime.now() - timedelta(days=1)).isoformat()
+        tm.reset_daily_tasks()
+        self.assertEqual(tm.get_task_by_id(t_all_day['id'])['status'], 'active')
+        if past_dt.date() == datetime.now().date():
+            self.assertEqual(tm.get_task_by_id(t_start_only['id'])['status'], 'active')
+
+        # 6. Verify Share ID round-trip preserves None for start_time and end_time
+        encoded = share_handler.encode_tasks([t_all_day, t_start_only], page_name="TestShare")
+        decoded_page, decoded_tasks = share_handler.decode_tasks(encoded)
+        self.assertEqual(decoded_page, "TestShare")
+        self.assertEqual(len(decoded_tasks), 2)
+        self.assertIsNone(decoded_tasks[0]['start_time'])
+        self.assertIsNone(decoded_tasks[0]['end_time'])
+        self.assertEqual(decoded_tasks[1]['start_time'], past_str)
+        self.assertIsNone(decoded_tasks[1]['end_time'])
+
+        # Clean up test tasks
+        tm.delete_task(t_all_day['id'])
+        tm.delete_task(t_start_only['id'])
+        self.window.hardcore_mode_enabled = False
+
+    def test_resilience_cache_cleanup_and_backup_recovery(self):
+        """Verify orphaned custom image cleanup, .bak recovery on corrupt JSON, sleep/wake recovery, and LRU pixmap bounds."""
+        import tempfile
+        import time
+        from src.task_manager import TaskManager
+        from src.qt_components import TaskCard
+
+        with tempfile.TemporaryDirectory(prefix="dt_resilience_") as tmpdir:
+            cache_dir = os.path.join(tmpdir, "cache")
+            os.makedirs(cache_dir, exist_ok=True)
+
+            active_img = os.path.join(cache_dir, "custom_active123.png")
+            orphan_img = os.path.join(cache_dir, "custom_orphan999.png")
+            with open(active_img, "wb") as f:
+                f.write(b"fake_png_active")
+            with open(orphan_img, "wb") as f:
+                f.write(b"fake_png_orphan")
+
+            tm = TaskManager(data_dir=tmpdir)
+            t1 = tm.add_task("Custom Icon Task", None, None, image_path=os.path.join("cache", "custom_active123.png"))
+            tm._save_queue.join()
+
+            # 1. Orphan cleanup removes custom_orphan999.png while keeping custom_active123.png
+            removed = tm.cleanup_orphaned_cache_images()
+            self.assertEqual(removed, 1)
+            self.assertTrue(os.path.exists(active_img))
+            self.assertFalse(os.path.exists(orphan_img))
+
+            # 2. Second save creates tasks.json.bak
+            tm.update_task_status(t1['id'], 'done')
+            tm._save_queue.join()
+            self.assertTrue(os.path.exists(tm._data_file + ".bak"))
+
+            # 3. Corrupt tasks.json and verify load_tasks() recovers from tasks.json.bak
+            with open(tm._data_file, "w", encoding="utf-8") as f:
+                f.write("{corrupted_json_syntax")
+            tm.load_tasks()
+            tm._save_queue.join()
+            recovered_tasks = tm.get_tasks()
+            self.assertEqual(len(recovered_tasks), 1)
+            self.assertEqual(recovered_tasks[0]['name'], "Custom Icon Task")
+
+            # 4. Deleting the task prunes custom_active123.png from cache/
+            tm.delete_task(t1['id'])
+            tm._save_queue.join()
+            self.assertFalse(os.path.exists(active_img))
+
+        # 5. Verify sleep/wake and tray re-registration handlers execute cleanly
+        self.window._on_system_resume_or_time_change()
+        self.window._re_register_tray_icon()
+        self.window.sound_manager.reset_audio_devices()
+
+        # 6. Verify TaskCard.cleanup() stops timers/animations and disconnects signals cleanly
+        card = TaskCard({
+            'id': 'cleanup-test', 'name': 'Cleanup Card', 'start_time': '09:00', 'end_time': '10:00',
+            'status': 'active', 'repeat_days': [0, 1, 2, 3, 4, 5, 6]
+        })
+        card.start_urgent_flashing()
+        card.start_active_pulse()
+        card.cleanup()
+        self.assertIsNone(card.flash_timer)
+        self.assertIsNone(card.pulse_timer)
+        card.deleteLater()
+
+    def test_share_handler_compact_v4_v5_and_legacy_v1_v2_v3(self):
+        """Verify compact V4/V5 Share IDs preserve start/end ON/OFF toggles, reduce length significantly, and decode legacy V1/V2/V3 codes."""
+        import struct
+        import base64
+        import tempfile
+        from src import share_handler
+        from src.constants import ALL_ICONS
+        from src.task_manager import TaskManager
+
+        routine_tasks = [
+            # 1. All-Day task (both start and end OFF, default icon, all 7 days)
+            {'id': '1', 'name': 'Read', 'image_path': '📝', 'start_time': None, 'end_time': None, 'repeat_days': [0, 1, 2, 3, 4, 5, 6], 'enabled': True},
+            # 2. Start-Only task on 15-min boundary (start ON, end OFF)
+            {'id': '2', 'name': 'Gym', 'image_path': '🏋️', 'start_time': '09:00', 'end_time': None, 'repeat_days': [0, 2, 4], 'enabled': True},
+            # 3. Start-Only task on arbitrary minute (start ON, end OFF)
+            {'id': '3', 'name': 'Standup Call', 'image_path': '💻', 'start_time': '10:13', 'end_time': None, 'repeat_days': [0, 1, 2, 3, 4], 'enabled': True},
+            # 4. Full-Window task on 15-min boundaries (both start and end ON)
+            {'id': '4', 'name': 'Deep Work', 'image_path': '🧠', 'start_time': '13:00', 'end_time': '16:30', 'repeat_days': [0, 1, 2, 3, 4, 5, 6], 'enabled': True},
+            # 5. Full-Window task on arbitrary minutes + disabled repeat_days=[]
+            {'id': '5', 'name': 'Night Review', 'image_path': '🌙', 'start_time': '21:05', 'end_time': '22:47', 'repeat_days': [], 'enabled': True},
+        ]
+
+        # Compare V3 length vs new V4/V5 length
+        v3_code = share_handler._encode_tasks_v3(routine_tasks, page_name="Default")
+        v4_code = share_handler.encode_tasks(routine_tasks, page_name="Default")
+        self.assertLess(len(v4_code), len(v3_code))
+
+        # Round-trip decode of new V4/V5 code
+        dec_page, dec_tasks = share_handler.decode_tasks(v4_code)
+        self.assertEqual(dec_page, "Default")
+        self.assertEqual(len(dec_tasks), 5)
+        for orig, dec in zip(routine_tasks, dec_tasks):
+            self.assertEqual(dec['name'], orig['name'])
+            self.assertEqual(dec['image_path'], orig['image_path'])
+            self.assertEqual(dec['start_time'], orig['start_time'])
+            self.assertEqual(dec['end_time'], orig['end_time'])
+            self.assertEqual(dec['repeat_days'], orig['repeat_days'])
+
+        # Verify legacy V3 code still decodes with 100% fidelity
+        v3_page, v3_tasks = share_handler.decode_tasks(v3_code)
+        self.assertEqual(v3_page, "Default")
+        self.assertEqual(len(v3_tasks), 5)
+        for orig, dec in zip(routine_tasks, v3_tasks):
+            self.assertEqual(dec['name'], orig['name'])
+            self.assertEqual(dec['image_path'], orig['image_path'])
+            self.assertEqual(dec['start_time'], orig['start_time'])
+            self.assertEqual(dec['end_time'], orig['end_time'])
+            self.assertEqual(dec['repeat_days'], orig['repeat_days'])
+
+        # Verify legacy V2 binary packet compatibility
+        v2_buf = bytearray([2, 1])  # Version 2, 1 task
+        packed_v2 = (540 << 21) | (600 << 10) | ALL_ICONS.index('💻')
+        v2_buf.extend(struct.pack('>I', packed_v2))
+        v2_buf.append(0b0010101)  # Mon, Wed, Fri
+        v2_buf.append(4)
+        v2_buf.extend(b'Code')
+        v2_code = base64.urlsafe_b64encode(v2_buf).decode('ascii')
+        v2_page, v2_tasks = share_handler.decode_tasks(v2_code)
+        self.assertIsNone(v2_page)
+        self.assertEqual(len(v2_tasks), 1)
+        self.assertEqual(v2_tasks[0]['name'], 'Code')
+        self.assertEqual(v2_tasks[0]['start_time'], '09:00')
+        self.assertEqual(v2_tasks[0]['end_time'], '10:00')
+        self.assertEqual(v2_tasks[0]['repeat_days'], [0, 2, 4])
+
+        # Verify legacy V1 binary packet compatibility
+        v1_buf = bytearray([1, 1])  # Version 1, 1 task
+        v1_buf.extend(struct.pack('>I', packed_v2))
+        v1_buf.append(4)
+        v1_buf.extend(b'Code')
+        v1_code = base64.urlsafe_b64encode(v1_buf).decode('ascii')
+        v1_page, v1_tasks = share_handler.decode_tasks(v1_code)
+        self.assertIsNone(v1_page)
+        self.assertEqual(len(v1_tasks), 1)
+        self.assertEqual(v1_tasks[0]['repeat_days'], [0, 1, 2, 3, 4, 5, 6])
+
+        # Verify larger multi-task routine uses V5 Deflate compression and is much shorter than V3
+        large_routine = [
+            {'id': str(i), 'name': f'Daily Habit Task #{i}', 'image_path': '📝', 'start_time': None, 'end_time': None, 'repeat_days': [0, 1, 2, 3, 4, 5, 6], 'enabled': True}
+            for i in range(12)
+        ]
+        v3_large = share_handler._encode_tasks_v3(large_routine, page_name="Morning & Evening")
+        v5_large = share_handler.encode_tasks(large_routine, page_name="Morning & Evening")
+        self.assertLess(len(v5_large), int(len(v3_large) * 0.55))
+        lp, lt = share_handler.decode_tasks(v5_large)
+        self.assertEqual(lp, "Morning & Evening")
+        self.assertEqual(len(lt), 12)
+
+        # Verify TaskManager.import_tasks_as_page initializes imported task states accurately
+        with tempfile.TemporaryDirectory(prefix="dt_import_") as tmpdir:
+            tm = TaskManager(data_dir=tmpdir)
+            imported_page = tm.import_tasks_as_page(dec_page, dec_tasks)
+            tm._save_queue.join()
+            page_tasks = tm.get_tasks(page_id=imported_page['id'])
+            by_name = {t['name']: t for t in page_tasks}
+            self.assertEqual(by_name['Read']['status'], 'active')          # All-Day -> immediately active
+            self.assertEqual(by_name['Night Review']['status'], 'disabled') # repeat_days=[] -> disabled
+
+    def test_architecture_and_performance_invariants(self):
+        """Enforce 60 FPS fluidity, zero-reflow delta rendering, background I/O isolation, and timer/CPU throttling."""
+        import time
+        from src.qt_components import TaskCard
+
+        # 1. Verify AddTaskCard singleton reuse and sub-5ms zero-reflow delta _load_tasks()
+        self.window._load_tasks()
+        add_card_before = self.window._add_task_card
+        self.assertIsNotNone(add_card_before)
+
+        t0 = time.perf_counter()
+        self.window._load_tasks()
+        delta_ms = (time.perf_counter() - t0) * 1000.0
+        self.assertIs(self.window._add_task_card, add_card_before)
+        self.assertLess(delta_ms, 5.0)
+
+        # 2. Verify main-thread save_tasks() and save_settings() are non-blocking (< 2.0ms)
+        t0 = time.perf_counter()
+        self.window.task_manager.save_tasks()
+        self.window.save_settings()
+        save_enqueue_ms = (time.perf_counter() - t0) * 1000.0
+        self.assertLess(save_enqueue_ms, 2.0)
+
+        # 3. Verify precision single-shot wake timer (no aggressive polling loops)
+        if getattr(self.window, 'update_timer', None) is None:
+            self.window._deferred_startup()
+        self.assertTrue(self.window.update_timer.isSingleShot())
+        self.assertGreaterEqual(self.window.update_timer.interval(), 1000)
+
+        # 4. Verify particle render loop pauses immediately when window is hidden
+        self.window.show()
+        self.window.hide()
+        self.assertFalse(self.window.particles.timer.isActive())
+
+        # 5. Verify bounded LRU pixmap cache invariant
+        self.assertLessEqual(len(TaskCard._PIXMAP_CACHE), TaskCard._PIXMAP_CACHE_MAX)
+
 
 if __name__ == '__main__':
     unittest.main()
+
+
 
 
 

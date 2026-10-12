@@ -1,7 +1,7 @@
 # Daily Tasks
 
-[![Download Installer](https://img.shields.io/badge/Download-DailyTasksSetup.exe-2ea44f?style=for-the-badge&logo=windows)](https://github.com/Moham-OverKill/Daily-Tasks/releases/download/v1.2.0/DailyTasksSetup.exe)
-[![Latest Release](https://img.shields.io/badge/Release-v1.2.0-blue?style=for-the-badge)](https://github.com/Moham-OverKill/Daily-Tasks/releases/tag/v1.2.0)
+[![Download Installer](https://img.shields.io/badge/Download-DailyTasksSetup.exe-2ea44f?style=for-the-badge&logo=windows)](https://github.com/Moham-OverKill/Daily-Tasks/releases/download/v1.4.0/DailyTasksSetup.exe)
+[![Latest Release](https://img.shields.io/badge/Release-v1.4.0-blue?style=for-the-badge)](https://github.com/Moham-OverKill/Daily-Tasks/releases/tag/v1.4.0)
 
 A simple Windows desktop app to help you organize your daily routines, build good habits, and stay on top of your schedule.
 
@@ -22,7 +22,7 @@ A simple Windows desktop app to help you organize your daily routines, build goo
 
 Click the link below to get the installer:
 
-**[Download DailyTasksSetup.exe](https://github.com/Moham-OverKill/Daily-Tasks/releases/download/v1.2.0/DailyTasksSetup.exe)**
+**[Download DailyTasksSetup.exe](https://github.com/Moham-OverKill/Daily-Tasks/releases/download/v1.4.0/DailyTasksSetup.exe)**
 
 Run the setup file, follow the quick installation steps, and start adding your tasks.
 

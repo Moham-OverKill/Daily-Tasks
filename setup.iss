@@ -1,7 +1,7 @@
 [Setup]
 AppId={{D37F21F0-8B30-4C9D-9F31-5E2B9A1C8E50}}
 AppName=Daily Tasks
-#define MyAppVersion "1.3.0"
+#define MyAppVersion "1.4.0"
 AppVersion={#MyAppVersion}
 AppPublisher=Antigravity
 DefaultDirName={autopf}\DailyTasks
@@ -49,7 +49,8 @@ Name: "clean_install_v2"; Description: "Clean Install (Reset all tasks and setti
 
 [Run]
 Filename: "powershell.exe"; Parameters: "-Command ""$ws = New-Object -ComObject WScript.Shell; $s = $ws.CreateShortcut([System.Environment]::GetFolderPath('Desktop') + '\Daily Tasks.lnk'); $s.TargetPath = '{app}\Daily Tasks.exe'; $s.IconLocation = '{app}\icon.ico'; $s.Save()"""; Flags: nowait skipifsilent runhidden; Tasks: desktopicon
-Filename: "{app}\Daily Tasks.exe"; Description: "Launch Daily Tasks"; Flags: nowait postinstall
+Filename: "{app}\Daily Tasks.exe"; Description: "Launch Daily Tasks"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\Daily Tasks.exe"; Flags: nowait skipifnotsilent
 
 
 [Code]
@@ -62,6 +63,10 @@ begin
   
   // Kill running app instantly (no waiting)
   Exec('taskkill.exe', '/F /IM "Daily Tasks.exe"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  if WizardSilent() then
+  begin
+    Sleep(350);
+  end;
   
   // Check if already installed and offer to uninstall (skip prompt during silent in-app updates)
   if not WizardSilent() then

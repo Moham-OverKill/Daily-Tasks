@@ -42,9 +42,28 @@ This document defines the mandatory build specifications, performance standards,
 
 ## 5. Standard Build Commands
 ```powershell
-# Step 1: Rebuild binary directory
-& "E:\Programs\Projects\Code\Daily Tasks\.venv\Scripts\python.exe" -m PyInstaller DailyTasks.spec --noconfirm
+# Step 1: Run full unit + performance benchmark suite
+python -m unittest discover -s tests -p "test_*.py" -v
 
-# Step 2: Compile ultra-compressed setup package
+# Step 2: Rebuild binary directory (optimize=2 stripped bytecode)
+py -m PyInstaller DailyTasks.spec --noconfirm
+
+# Step 3: Compile ultra-compressed setup package
 & "E:\Programs\Projects\Code\Daily Tasks\node_modules\innosetup\bin\ISCC.exe" "E:\Programs\Projects\Code\Daily Tasks\setup.iss"
 ```
+
+---
+
+## 6. Mandatory Post-Update Performance & Resilience Verification Gate
+Every code update MUST be verified against these non-negotiable standards before packaging:
+1. **Locked 60 FPS & Zero-Reflow Delta Updates**:
+   - `_load_tasks()` reuses the singleton `AddTaskCard` and skips `QGridLayout` teardown/reflow when task ordering is unchanged (`< 2ms` delta update).
+   - Main UI thread is strictly isolated from disk writes, cache scans, and network requests (`save_tasks()`, `save_settings()`, and `_schedule_cache_cleanup()` run on background daemon workers).
+2. **Instant Cold Boot & `<0.1ms` Secondary Handshake**:
+   - `start.py` executes `try_activate_existing_instance()` via native Win32 `CreateFileW` on `\\.\pipe\DailyTasksAppIPCV2_5` prior to importing `PySide6`.
+   - Dialogs and `SettingsPanel` are lazily constructed only upon first user interaction.
+3. **Near-0% Idle CPU & Bounded Memory**:
+   - Background scheduling uses precision `singleShot` wake timers (`_schedule_next_tick`) rather than short-interval polling.
+   - `ParticleBackground` halts immediately when minimized or hidden to tray.
+   - `TaskCard._PIXMAP_CACHE` is strictly bounded (128-entry LRU), and orphaned `cache/custom_*` files are pruned asynchronously on the background worker thread.
+

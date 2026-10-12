@@ -71,35 +71,70 @@ class TaskManager:
     def prayer_handler(self, value):
         self._prayer_handler = value
 
+    def _schedule_cache_cleanup(self):
+        """Enqueue an asynchronous orphan-cache cleanup on the background worker thread."""
+        self._save_queue.put("__CLEANUP_CACHE__")
+
     def _save_worker(self):
-        """Background thread that writes state to disk without blocking the UI"""
+        """Background thread that writes state to disk and prunes orphaned cache files without blocking the UI."""
+        import shutil
         while True:
-            state = self._save_queue.get()
+            item = self._save_queue.get()
             drained_count = 0
+            run_cleanup = (item == "__CLEANUP_CACHE__")
+            state = None if run_cleanup else item
             try:
-                # Drain queue to only save the newest state if rapid clicks occurred
+                # Drain queue to coalesce rapid consecutive saves and cleanup flags
                 while not self._save_queue.empty():
                     try:
-                        state = self._save_queue.get_nowait()
+                        nxt = self._save_queue.get_nowait()
                         drained_count += 1
+                        if nxt == "__CLEANUP_CACHE__":
+                            run_cleanup = True
+                        else:
+                            state = nxt
                     except queue.Empty:
                         break
 
-                temp_file = self._data_file + ".tmp"
-                os.makedirs(os.path.dirname(self._data_file), exist_ok=True)
-                with open(temp_file, 'w') as f:
-                    json.dump(state, f, separators=(',', ':'))
-                if os.path.exists(self._data_file):
-                    os.replace(temp_file, self._data_file)
-                else:
-                    os.rename(temp_file, self._data_file)
+                if state is not None:
+                    temp_file = f"{self._data_file}.{threading.get_ident()}.tmp"
+                    bak_file = self._data_file + ".bak"
+                    os.makedirs(os.path.dirname(self._data_file), exist_ok=True)
+                    with open(temp_file, 'w', encoding='utf-8') as f:
+                        json.dump(state, f, separators=(',', ':'))
+                        f.flush()
+
+                    if os.path.exists(self._data_file):
+                        try:
+                            if os.path.getsize(self._data_file) > 2:
+                                shutil.copy2(self._data_file, bak_file)
+                        except OSError:
+                            pass
+                    for attempt in range(4):
+                        try:
+                            os.replace(temp_file, self._data_file)
+                            break
+                        except PermissionError:
+                            if attempt == 3:
+                                raise
+                            time.sleep(0.015)
+
+                if run_cleanup:
+                    self.cleanup_orphaned_cache_images()
 
             except Exception as e:
                 print(f"Async save failed: {e}")
             finally:
+                if 'temp_file' in locals() and os.path.exists(temp_file):
+                    try:
+                        os.remove(temp_file)
+                    except OSError:
+                        pass
                 self._save_queue.task_done()
                 for _ in range(drained_count):
                     self._save_queue.task_done()
+
+
 
 
     def save_tasks(self):
@@ -167,6 +202,7 @@ class TaskManager:
         for i, p in enumerate(self.pages):
             p['order'] = i
         self.save_tasks()
+        self._schedule_cache_cleanup()
 
     def toggle_mute(self, page_id):
         """Toggle mute state for a page. Returns new mute state."""
@@ -212,83 +248,164 @@ class TaskManager:
         self.save_tasks()
 
     # ═══════════════════════════════════════════════════════════
-    # DATA PERSISTENCE
+    # DATA PERSISTENCE & CACHE HYGIENE
     # ═══════════════════════════════════════════════════════════
 
+    def _apply_loaded_data(self, data):
+        """Validate and apply parsed JSON data into self.pages and self.global_prayers."""
+        # ── Migration: old flat list → new pages structure ──
+        if isinstance(data, list):
+            print("Migrating flat task list to page-based structure...")
+            clean = [t for t in data if isinstance(t, dict)]
+            self.pages = [{
+                'id': str(uuid.uuid4()),
+                'name': 'My Routine',
+                'muted': False,
+                'order': 0,
+                'tasks': clean
+            }]
+            self.global_prayers = {}
+            self.save_tasks()  # Save in new format immediately
+            return
+
+        # ── New format: dict with 'pages' key ──
+        if isinstance(data, dict) and 'pages' in data:
+            pages = data['pages']
+            global_prayers = data.get('global_prayers', {})
+            if not isinstance(pages, list):
+                raise ValueError(f"Expected pages list, got {type(pages).__name__}")
+            if not isinstance(global_prayers, dict):
+                global_prayers = {}
+            self.global_prayers = global_prayers
+
+            # Validate each page and migrate prayers out
+            clean_pages = []
+            for p in pages:
+                if not isinstance(p, dict):
+                    continue
+                tasks = p.get('tasks', [])
+                if not isinstance(tasks, list):
+                    tasks = []
+
+                clean_tasks = []
+                for t in tasks:
+                    if not isinstance(t, dict):
+                        continue
+
+                    # Migrate synced prayers to global
+                    if t.get('is_synced', False) or t.get('name') in ['Fajr', 'Dhuhr', 'Asr', 'Maghrib', 'Isha']:
+                        global_id = f"global_{t['name']}"
+                        t['id'] = global_id
+                        if global_id not in self.global_prayers:
+                            self.global_prayers[global_id] = t
+                    else:
+                        clean_tasks.append(t)
+
+                p['tasks'] = clean_tasks
+                clean_pages.append(p)
+
+            self.pages = clean_pages
+        else:
+            raise ValueError("Unrecognized data format")
+
     def load_tasks(self):
+        bak_path = self._data_file + ".bak"
         if os.path.exists(self._data_file):
             try:
-                with open(self._data_file, 'r') as f:
+                with open(self._data_file, 'r', encoding='utf-8') as f:
                     data = json.load(f)
-
-                # ── Migration: old flat list → new pages structure ──
-                if isinstance(data, list):
-                    print("Migrating flat task list to page-based structure...")
-                    clean = [t for t in data if isinstance(t, dict)]
-                    self.pages = [{
-                        'id': str(uuid.uuid4()),
-                        'name': 'My Routine',
-                        'muted': False,
-                        'order': 0,
-                        'tasks': clean
-                    }]
-                    self.save_tasks()  # Save in new format immediately
-                    return
-
-                # ── New format: dict with 'pages' key ──
-                if isinstance(data, dict) and 'pages' in data:
-                    pages = data['pages']
-                    self.global_prayers = data.get('global_prayers', {})
-                    if not isinstance(pages, list):
-                        raise ValueError(f"Expected pages list, got {type(pages).__name__}")
-
-                    # Validate each page and migrate prayers out
-                    clean_pages = []
-                    for p in pages:
-                        if not isinstance(p, dict):
-                            continue
-                        tasks = p.get('tasks', [])
-                        if not isinstance(tasks, list):
-                            tasks = []
-
-                        clean_tasks = []
-                        for t in tasks:
-                            if not isinstance(t, dict): continue
-
-                            # Migrate synced prayers to global
-                            if t.get('is_synced', False) or t.get('name') in ['Fajr', 'Dhuhr', 'Asr', 'Maghrib', 'Isha']:
-                                global_id = f"global_{t['name']}"
-                                t['id'] = global_id
-                                if global_id not in self.global_prayers:
-                                    self.global_prayers[global_id] = t
-                            else:
-                                clean_tasks.append(t)
-
-                        p['tasks'] = clean_tasks
-                        clean_pages.append(p)
-
-                    self.pages = clean_pages
-                else:
-                    raise ValueError(f"Unrecognized data format")
-
-            except (json.JSONDecodeError, ValueError) as e:
-                print(f"Task file corrupt ({e}). Backing up and resetting.")
-                backup_path = self._data_file + ".bak"
+                self._apply_loaded_data(data)
+                self._schedule_cache_cleanup()
+                return
+            except (json.JSONDecodeError, ValueError, OSError) as e:
+                print(f"Task file corrupt ({e}). Attempting recovery from backup...")
+                corrupt_path = self._data_file + ".corrupt"
                 try:
                     import shutil
-                    shutil.copy2(self._data_file, backup_path)
+                    shutil.copy2(self._data_file, corrupt_path)
                 except Exception:
                     pass
+
+                # Attempt recovery from last-known-good .bak file
+                if os.path.exists(bak_path):
+                    try:
+                        with open(bak_path, 'r', encoding='utf-8') as bf:
+                            bak_data = json.load(bf)
+                        self._apply_loaded_data(bak_data)
+                        self.save_tasks()
+                        print("Successfully recovered tasks from backup (.bak).")
+                        self._schedule_cache_cleanup()
+                        return
+                    except Exception as bak_err:
+                        print(f"Backup recovery failed ({bak_err}). Resetting to empty state.")
+
+                self.pages = []
+                self.global_prayers = {}
+        elif os.path.exists(bak_path):
+            try:
+                with open(bak_path, 'r', encoding='utf-8') as bf:
+                    bak_data = json.load(bf)
+                self._apply_loaded_data(bak_data)
+                self.save_tasks()
+                self._schedule_cache_cleanup()
+                return
+            except Exception:
                 self.pages = []
                 self.global_prayers = {}
         else:
             self.pages = []
             self.global_prayers = {}
 
+    def cleanup_orphaned_cache_images(self):
+        """
+        Scan the DailyTasks/cache directory and remove orphaned custom_* image files
+        whose parent tasks were deleted or had their icon replaced.
+        Returns the number of deleted orphaned files.
+        """
+        try:
+            cache_dir = os.path.join(os.path.dirname(self._data_file), 'cache')
+            if not os.path.isdir(cache_dir):
+                return 0
 
-    def add_task(self, name, start_time, end_time, image_path=None, is_synced=False, enabled=True, repeat_days=None, page_id=None):
+            referenced_basenames = set()
+            for page in self.pages:
+                for task in page.get('tasks', ()):
+                    img = task.get('image_path')
+                    if img and isinstance(img, str):
+                        referenced_basenames.add(os.path.basename(img))
+
+            for task in self.global_prayers.values():
+                if isinstance(task, dict):
+                    img = task.get('image_path')
+                    if img and isinstance(img, str):
+                        referenced_basenames.add(os.path.basename(img))
+
+            removed = 0
+            for fname in os.listdir(cache_dir):
+                if not fname.startswith('custom_'):
+                    continue
+                if fname not in referenced_basenames:
+                    fpath = os.path.join(cache_dir, fname)
+                    try:
+                        if os.path.isfile(fpath):
+                            os.remove(fpath)
+                            removed += 1
+                    except OSError:
+                        pass
+            return removed
+        except Exception as e:
+            print(f"Cache cleanup warning: {e}")
+            return 0
+
+
+    def add_task(self, name, start_time=None, end_time=None, image_path=None, is_synced=False, enabled=True, repeat_days=None, page_id=None):
         if repeat_days is None:
             repeat_days = [0,1,2,3,4,5,6]
+        if not start_time:
+            start_time = None
+            end_time = None
+        elif not end_time:
+            end_time = None
 
         # Find target page
         if page_id is None:
@@ -340,8 +457,15 @@ class TaskManager:
 
     def update_task_details(self, task_id, name, start_time, end_time, image_path=None, repeat_days=None):
         task_id = str(task_id)
+        if not start_time:
+            start_time = None
+            end_time = None
+        elif not end_time:
+            end_time = None
+
         if task_id.startswith('global_') and task_id in self.global_prayers:
             task = self.global_prayers[task_id]
+            old_img = task.get('image_path')
             task['name'] = name
             task['start_time'] = start_time
             task['end_time'] = end_time
@@ -350,12 +474,16 @@ class TaskManager:
                 task['repeat_days'] = repeat_days
             if task['status'] == 'failed':
                 task['status'] = 'pending'
+            self.check_state_consistency(task, save=False)
             self.save_tasks()
+            if old_img and old_img != image_path:
+                self._schedule_cache_cleanup()
             return True
             
         for page in self.pages:
             for task in page['tasks']:
                 if task['id'] == task_id:
+                    old_img = task.get('image_path')
                     task['name'] = name
                     task['start_time'] = start_time
                     task['end_time'] = end_time
@@ -364,7 +492,10 @@ class TaskManager:
                         task['repeat_days'] = repeat_days
                     if task['status'] == 'failed':
                         task['status'] = 'pending'
+                    self.check_state_consistency(task, save=False)
                     self.save_tasks()
+                    if old_img and old_img != image_path:
+                        self._schedule_cache_cleanup()
                     return True
         return False
 
@@ -393,36 +524,52 @@ class TaskManager:
                 return 'pending', True
             return task.get('status', 'pending'), False
 
-        try:
-            start_secs = _parse_hhmm_to_secs(task['start_time'])
-            end_secs = _parse_hhmm_to_secs(task['end_time'])
-        except (ValueError, KeyError):
-            return task.get('status', 'pending'), False
-
-        now_secs = now.hour * 3600 + now.minute * 60 + now.second + (0.000001 if now.microsecond else 0.0)
-
-        # Midnight Handling
-        if end_secs < start_secs:
-            if now.hour < 12:
-                start_secs -= 86400
-            else:
-                end_secs += 86400
-
         current_status = task.get('status', 'pending')
-        new_status = current_status
-
         if current_status == 'done':
             return 'done', False
 
-        if now_secs < start_secs:
-            if current_status in ['active', 'failed']:
+        start_str = task.get('start_time')
+        end_str = task.get('end_time')
+        now_secs = now.hour * 3600 + now.minute * 60 + now.second + (0.000001 if now.microsecond else 0.0)
+        new_status = current_status
+
+        # Case 1: Both Start & End OFF -> All-Day Active on scheduled days
+        if not start_str:
+            new_status = 'active'
+        # Case 2: Start ON, End OFF -> Pending before start_time, Active afterwards (cannot fail)
+        elif not end_str:
+            try:
+                start_secs = _parse_hhmm_to_secs(start_str)
+            except (ValueError, KeyError):
+                return current_status, False
+            if now_secs < start_secs:
                 new_status = 'pending'
-        elif start_secs <= now_secs <= end_secs:
-            if current_status in ['pending', 'failed']:
+            else:
                 new_status = 'active'
-        elif now_secs > end_secs:
-            if current_status in ['pending', 'active']:
-                new_status = 'failed'
+        # Case 3: Both Start & End ON -> Full time window with deadline
+        else:
+            try:
+                start_secs = _parse_hhmm_to_secs(start_str)
+                end_secs = _parse_hhmm_to_secs(end_str)
+            except (ValueError, KeyError):
+                return current_status, False
+
+            # Midnight Handling
+            if end_secs < start_secs:
+                if now.hour < 12:
+                    start_secs -= 86400
+                else:
+                    end_secs += 86400
+
+            if now_secs < start_secs:
+                if current_status in ['active', 'failed', 'disabled']:
+                    new_status = 'pending'
+            elif start_secs <= now_secs <= end_secs:
+                if current_status in ['pending', 'failed', 'disabled']:
+                    new_status = 'active'
+            elif now_secs > end_secs:
+                if current_status in ['pending', 'active', 'disabled']:
+                    new_status = 'failed'
 
         if new_status != current_status:
             task['status'] = new_status
@@ -437,11 +584,14 @@ class TaskManager:
         if task_id.startswith('global_') and task_id in self.global_prayers:
             del self.global_prayers[task_id]
             self.save_tasks()
+            self._schedule_cache_cleanup()
             return
             
         for page in self.pages:
             page['tasks'] = [t for t in page['tasks'] if str(t['id']) != task_id]
         self.save_tasks()
+        self._schedule_cache_cleanup()
+
 
     def get_tasks(self, page_id=None):
         """
@@ -616,24 +766,29 @@ class TaskManager:
                 if completed_at and completed_at.startswith(today_str):
                     continue
 
-            # Check overnight tasks
-            try:
-                start_secs = _parse_hhmm_to_secs(task['start_time'])
-                end_secs = _parse_hhmm_to_secs(task['end_time'])
+            start_str = task.get('start_time')
+            end_str = task.get('end_time')
 
-                if end_secs < start_secs:
-                    if now_hour < 12:
-                        start_secs -= 86400
-                    else:
-                        end_secs += 86400
+            # Check overnight tasks only when both start and end times exist
+            if start_str and end_str:
+                try:
+                    start_secs = _parse_hhmm_to_secs(start_str)
+                    end_secs = _parse_hhmm_to_secs(end_str)
 
-                if start_secs <= now_secs <= end_secs and task['status'] == 'active':
-                    continue
-            except (ValueError, KeyError):
-                pass
+                    if end_secs < start_secs:
+                        if now_hour < 12:
+                            start_secs -= 86400
+                        else:
+                            end_secs += 86400
+
+                    if start_secs <= now_secs <= end_secs and task['status'] == 'active':
+                        continue
+                except (ValueError, KeyError):
+                    pass
 
             task['status'] = 'pending'
             task.pop('completed_at', None)
+            self.check_state_consistency(task, save=False)
 
         self.save_tasks()
 
@@ -659,15 +814,6 @@ class TaskManager:
             if current_status == 'done':
                 continue
 
-            start_str = task.get('start_time', '00:00')
-            end_str = task.get('end_time', '23:59')
-
-            try:
-                start_secs = _parse_hhmm_to_secs(start_str)
-                end_secs = _parse_hhmm_to_secs(end_str)
-            except ValueError:
-                continue
-
             repeat_days = task.get('repeat_days', [0,1,2,3,4,5,6])
 
             if len(repeat_days) == 0:
@@ -675,19 +821,43 @@ class TaskManager:
             elif current_weekday not in repeat_days:
                 new_status = 'pending'
             else:
-                # Midnight handling: consistent with check_state_consistency
-                if end_secs < start_secs:
-                    if now_hour < 12:
-                        start_secs -= 86400
-                    else:
-                        end_secs += 86400
+                start_str = task.get('start_time')
+                end_str = task.get('end_time')
 
-                if start_secs <= now_secs <= end_secs:
+                # Case 1: Both Start & End OFF -> All-Day Active
+                if not start_str:
                     new_status = 'active'
-                elif now_secs < start_secs:
-                    new_status = 'pending'
+                # Case 2: Start ON, End OFF -> Pending before start, Active afterwards (cannot fail)
+                elif not end_str:
+                    try:
+                        start_secs = _parse_hhmm_to_secs(start_str)
+                    except ValueError:
+                        continue
+                    if now_secs < start_secs:
+                        new_status = 'pending'
+                    else:
+                        new_status = 'active'
+                # Case 3: Both Start & End ON -> Full time window
                 else:
-                    new_status = 'failed'
+                    try:
+                        start_secs = _parse_hhmm_to_secs(start_str)
+                        end_secs = _parse_hhmm_to_secs(end_str)
+                    except ValueError:
+                        continue
+
+                    # Midnight handling: consistent with check_state_consistency
+                    if end_secs < start_secs:
+                        if now_hour < 12:
+                            start_secs -= 86400
+                        else:
+                            end_secs += 86400
+
+                    if start_secs <= now_secs <= end_secs:
+                        new_status = 'active'
+                    elif now_secs < start_secs:
+                        new_status = 'pending'
+                    else:
+                        new_status = 'failed'
 
             if current_status != new_status:
                 task['status'] = new_status
