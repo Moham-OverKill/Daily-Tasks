@@ -237,10 +237,10 @@ class ParticleBackground(QWidget):
         self._prev_w = 0
         self._prev_h = 0
 
-        # Adaptive 60 FPS active / 0% CPU idle suspension
+        # Continuous 60 FPS while window is visible; 0% CPU when hidden/minimized/simple_mode
         self._frame_count = 0
         self._mouse_idle_frames = 0
-        self._IDLE_THRESHOLD = 45  # ~0.75s at 60fps before suspending timer to 0% CPU
+        self._MOUSE_REPEL_ACTIVE_FRAMES = 90  # ~1.5s active cursor repulsion after mouse stops moving
         self._running_fps = 60
 
         # Animation timer
@@ -323,12 +323,13 @@ class ParticleBackground(QWidget):
         self._prev_h = h
                 
     def start(self, fps=60):
-        """Start the 60 FPS animation loop (auto-suspends to 0% CPU once idle)"""
+        """Start the 60 FPS animation loop while visible"""
         if self.simple_mode and not self.shockwaves and not any(p.life is not None for p in self.particles):
             return
         self._mouse_idle_frames = 0
         self._running_fps = fps
-        self.timer.start(max(16, 1000 // fps))
+        if not self.timer.isActive():
+            self.timer.start(max(16, 1000 // fps))
         
     def stop(self):
         """Stop the animation loop"""
@@ -345,10 +346,12 @@ class ParticleBackground(QWidget):
             self.update()
         else:
             self.spawn_ambient()
+            if self.isVisible():
+                self.start(fps=60)
             self.update()
         
     def on_mouse_move(self, x, y):
-        """Update mouse position for interactive effects and wake 60 FPS loop"""
+        """Update mouse position for interactive effects and ensure 60 FPS loop is active"""
         if x == self.mouse_x and y == self.mouse_y:
             return
         self.mouse_x = x
@@ -401,9 +404,14 @@ class ParticleBackground(QWidget):
             self.timer.setInterval(16)
 
     def animate(self):
-        """Update all particles at 60 FPS when active, suspending to 0% CPU when idle"""
+        """Update all particles at 60 FPS while window is visible; suspend to 0% CPU when hidden or minimized"""
         parent = self.parentWidget()
-        if not self.isVisible() or (parent is not None and not parent.isVisible()):
+        win = self.window()
+        if (
+            not self.isVisible()
+            or (parent is not None and not parent.isVisible())
+            or (win is not None and win.isMinimized())
+        ):
             self.stop()
             return
 
@@ -422,18 +430,15 @@ class ParticleBackground(QWidget):
 
         has_transients = bool(self.shockwaves) or any(p.life is not None for p in self.particles)
 
-        # ── Event-Driven Idle Suspension (0.0% Idle CPU) ────────────────────
-        if has_transients:
-            self._mouse_idle_frames = 0
-        else:
-            self._mouse_idle_frames += 1
-            if self._mouse_idle_frames >= self._IDLE_THRESHOLD:
-                self.stop()
-                return
+        if self.simple_mode and not has_transients:
+            self.stop()
+            return
+
+        self._mouse_idle_frames += 1
 
         # ── Update particles ──────────────────────────────────────────────────
         mx, my = self.mouse_x, self.mouse_y
-        has_mouse = (mx >= 0 and my >= 0)
+        has_mouse = (mx >= 0 and my >= 0 and self._mouse_idle_frames < self._MOUSE_REPEL_ACTIVE_FRAMES)
         full_dirty = False
 
         for p in self.particles:

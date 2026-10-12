@@ -240,6 +240,7 @@ class DailyTasksWindow(QMainWindow):
         self.dnd_enabled = False
         self.prayer_mode_enabled = False
         self.simple_mode_enabled = False
+        self.hide_non_today_enabled = False
         self.hardcore_mode_enabled = False
         self.ui_sounds_enabled = True
         self.ui_volume = 80
@@ -328,6 +329,7 @@ class DailyTasksWindow(QMainWindow):
             self.dnd_enabled = bool(settings.get('dnd_enabled', False))
             self.prayer_mode_enabled = bool(settings.get('prayer_mode_enabled', False))
             self.simple_mode_enabled = bool(settings.get('simple_mode_enabled', False))
+            self.hide_non_today_enabled = bool(settings.get('hide_non_today_enabled', False))
             self.hardcore_mode_enabled = bool(settings.get('hardcore_mode_enabled', False))
             self.ui_sounds_enabled = bool(settings.get('ui_sounds_enabled', True))
             try:
@@ -380,7 +382,8 @@ class DailyTasksWindow(QMainWindow):
                 self.simple_mode_enabled,
                 self.hardcore_mode_enabled,
                 self.ui_sounds_enabled,
-                self.ui_volume
+                self.ui_volume,
+                self.hide_non_today_enabled
             )
             panel.set_prayer_loading(self._prayer_loading)
             panel.set_update_state(**self._update_state)
@@ -388,6 +391,7 @@ class DailyTasksWindow(QMainWindow):
             panel.dnd_toggled.connect(self._toggle_dnd)
             panel.prayer_mode_toggled.connect(self._toggle_prayer_mode)
             panel.simple_mode_toggled.connect(self._toggle_simple_mode)
+            panel.hide_non_today_toggled.connect(self._toggle_hide_non_today)
             panel.hardcore_mode_toggled.connect(self._toggle_hardcore_mode)
             panel.ui_sounds_toggled.connect(self._toggle_ui_sounds)
             panel.ui_volume_changed.connect(self._on_ui_volume_changed)
@@ -710,19 +714,6 @@ class DailyTasksWindow(QMainWindow):
         if hasattr(self, 'title_bar'):
             self.title_bar.update_max_button_icon(self.isMaximized())
 
-
-    def hideEvent(self, event):
-        """Pause particle animation timer when window is hidden to tray"""
-        if hasattr(self, 'particles'):
-            self.particles.stop()
-        super().hideEvent(event)
-
-    def showEvent(self, event):
-        """Resume particle animation timer when window becomes visible"""
-        if hasattr(self, 'particles') and not self.isMinimized():
-            self.particles.start(fps=60)
-        super().showEvent(event)
-
     def _update_resize_cursor(self, pos):
         """Update global cursor based on border proximity"""
         if self.isMaximized():
@@ -788,15 +779,18 @@ class DailyTasksWindow(QMainWindow):
         if etype not in self._FILTERED_EVENTS:
             return False
 
+        if not self.isVisible() or self.isMinimized() or QApplication.activeWindow() is None:
+            return False
+
         if etype == QEvent.MouseMove:
-            if not self.isMaximized():
-                now_t = time.perf_counter()
-                if now_t - self._last_mouse_filter_t >= 0.015:
-                    self._last_mouse_filter_t = now_t
-                    pos = self.mapFromGlobal(QCursor.pos())
+            now_t = time.perf_counter()
+            if now_t - self._last_mouse_filter_t >= 0.015:
+                self._last_mouse_filter_t = now_t
+                pos = self.mapFromGlobal(QCursor.pos())
+                if not self.isMaximized():
                     self._update_resize_cursor(pos)
-                    if hasattr(self, 'particles'):
-                        self.particles.on_mouse_move(pos.x(), pos.y())
+                if hasattr(self, 'particles'):
+                    self.particles.on_mouse_move(pos.x(), pos.y())
 
         elif etype == QEvent.Enter:
             if isinstance(obj, (QAbstractButton, QComboBox, QSlider)):
@@ -1098,6 +1092,13 @@ class DailyTasksWindow(QMainWindow):
     def _load_tasks(self, animate=False, first_load=False):
         """Load and display tasks for the active page with zero-reflow delta update when order is unchanged."""
         tasks = self.task_manager.get_tasks(page_id=self.active_page_id)
+        if getattr(self, 'hide_non_today_enabled', False):
+            today_weekday = datetime.now().weekday()
+            tasks = [
+                t for t in tasks
+                if today_weekday in t.get('repeat_days', [0, 1, 2, 3, 4, 5, 6])
+                and t.get('status') != 'disabled'
+            ]
         tasks.sort(key=lambda x: (0 if not x.get('start_time') else 1, x.get('start_time') or ''))
 
         new_grid_order = tuple(t['id'] for t in tasks)
@@ -1852,6 +1853,12 @@ class DailyTasksWindow(QMainWindow):
         # Propagate to all TaskCards
         for card in self.task_cards.values():
             card.set_animations_enabled(not enabled)
+
+    def _toggle_hide_non_today(self, enabled):
+        """Toggle hiding tasks that are not scheduled for today"""
+        self.hide_non_today_enabled = bool(enabled)
+        self._load_tasks()
+        self.save_settings()
             
     def _toggle_hardcore_mode(self, enabled):
         """Toggle hardcore mode"""
@@ -1957,6 +1964,13 @@ class DailyTasksWindow(QMainWindow):
             return
 
         all_tasks = self.task_manager.get_tasks(page_id=self.active_page_id)
+        if getattr(self, 'hide_non_today_enabled', False):
+            today_weekday = datetime.now().weekday()
+            all_tasks = [
+                t for t in all_tasks
+                if today_weekday in t.get('repeat_days', [0, 1, 2, 3, 4, 5, 6])
+                and t.get('status') != 'disabled'
+            ]
         task_map = {str(t['id']): t for t in all_tasks}
 
         for tid in changed_ids:
@@ -1967,6 +1981,9 @@ class DailyTasksWindow(QMainWindow):
                     # Task disappeared from active page (e.g. prayer removed) — full reload
                     self._load_tasks()
                     return
+            elif tid in task_map:
+                self._load_tasks()
+                return
 
         self._update_app_icon()
 
@@ -2003,6 +2020,8 @@ class DailyTasksWindow(QMainWindow):
                 self._last_opened_date = today_str
                 self._flashed_urgent_tasks.clear()
                 self.task_manager.reset_daily_tasks()
+                if not self.dnd_enabled:
+                    self.sound_manager.play_start()
                 if self.prayer_mode_enabled:
                     self._sync_prayers_background(silent=True)
                 self._load_tasks()
@@ -2040,6 +2059,8 @@ class DailyTasksWindow(QMainWindow):
                 self._last_opened_date = today_str
                 self._flashed_urgent_tasks.clear()
                 self.task_manager.reset_daily_tasks()
+                if not self.dnd_enabled:
+                    self.sound_manager.play_start()
                 if self.prayer_mode_enabled:
                     self._sync_prayers_background(silent=True)
                 self._load_tasks()
@@ -2137,19 +2158,14 @@ class DailyTasksWindow(QMainWindow):
             pass
 
     def changeEvent(self, event):
-        """Detect window activation to stop flashing and pause animations when unfocused"""
+        """Detect window activation to stop flashing and manage particle timer on minimize/restore"""
         if event.type() == QEvent.ActivationChange:
             if self.isActiveWindow():
                 self._stop_flashing()
                 # Consider user 'notified' if they viewed the app
                 self._has_flashed_batch = True
-                # Restart particles on focus
-                if hasattr(self, 'particles'):
+                if hasattr(self, 'particles') and not self.isMinimized() and self.isVisible():
                     self.particles.start(fps=60)
-            else:
-                # OPTIMIZATION: Stop particles completely when window is unfocused (clicking elsewhere)
-                if hasattr(self, 'particles'):
-                    self.particles.stop()
         
         elif event.type() == QEvent.WindowStateChange:
             if hasattr(self, 'title_bar'):
@@ -2160,8 +2176,7 @@ class DailyTasksWindow(QMainWindow):
                     self.particles.stop()
             else:
                 # Restart particles when restored
-                if hasattr(self, 'particles'):
-                    # Only restart if not already running (start() handles restart safely)
+                if hasattr(self, 'particles') and self.isVisible():
                     self.particles.start(fps=60)
         super().changeEvent(event)
 
@@ -2271,6 +2286,7 @@ class DailyTasksWindow(QMainWindow):
             dnd = bool(settings.get('dnd_enabled', False))
             prayer = bool(settings.get('prayer_mode_enabled', False))
             simple = bool(settings.get('simple_mode_enabled', False))
+            hide_non_today = bool(settings.get('hide_non_today_enabled', False))
             hardcore = bool(settings.get('hardcore_mode_enabled', False))
             ui_sounds = bool(settings.get('ui_sounds_enabled', True))
             try:
@@ -2282,6 +2298,7 @@ class DailyTasksWindow(QMainWindow):
             self.dnd_enabled = dnd
             self.prayer_mode_enabled = prayer
             self.simple_mode_enabled = simple
+            self.hide_non_today_enabled = hide_non_today
             self.hardcore_mode_enabled = hardcore
             self.ui_sounds_enabled = ui_sounds
             self.ui_volume = ui_vol
@@ -2291,7 +2308,9 @@ class DailyTasksWindow(QMainWindow):
 
             if self._settings_panel is not None:
                 self._settings_panel._set_theme(theme)
-                self._settings_panel.set_values(dnd, prayer, simple, hardcore, ui_sounds, ui_vol)
+                self._settings_panel.set_values(
+                    dnd, prayer, simple, hardcore, ui_sounds, ui_vol, hide_non_today
+                )
             self._apply_theme(theme, save=False)
             
             self._initial_scroll_pos = settings.get('scroll_position', 0)
@@ -2558,6 +2577,7 @@ class DailyTasksWindow(QMainWindow):
             settings = {
                 'dnd_enabled': self.dnd_enabled,
                 'simple_mode_enabled': self.simple_mode_enabled,
+                'hide_non_today_enabled': getattr(self, 'hide_non_today_enabled', False),
                 'prayer_mode_enabled': prayer_enabled,
                 'hardcore_mode_enabled': self.hardcore_mode_enabled,
                 'ui_sounds_enabled': getattr(self, 'ui_sounds_enabled', True),

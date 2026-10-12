@@ -76,6 +76,10 @@ class SoundManager:
         self.dnd_enabled = False
         self.ui_sounds_enabled = True
         self.ui_volume = 0.80  # 0.0 to 1.0 (default 80%)
+        self._headless_mute = (
+            os.environ.get("QT_QPA_PLATFORM", "").lower() == "offscreen"
+            or os.environ.get("DAILYTASKS_MUTE_AUDIO", "") == "1"
+        )
 
         # Debounce / state tracking (accessed on UI thread in <2us)
         self._last_hover_time = 0.0
@@ -262,7 +266,7 @@ class SoundManager:
     def _open_waveout_pool(self, winmm_dll):
         """Open fixed pool of 8 polyphonic waveOut channels (44.1kHz, 16-bit, stereo)."""
         pool = []
-        if winmm_dll is None:
+        if winmm_dll is None or self._headless_mute:
             return pool
         try:
             wfx = _WAVEFORMATEX(1, 2, 44100, 44100 * 4, 4, 16, 0)
@@ -327,6 +331,8 @@ class SoundManager:
 
                 while self._queue and not self._closed:
                     kind, filename = self._queue.popleft()
+                    if self._headless_mute:
+                        continue
                     if kind == "alert":
                         if self.dnd_enabled:
                             continue

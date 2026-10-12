@@ -143,6 +143,14 @@ class TestUIAppLaunch(unittest.TestCase):
             self.assertIn(key, sm._scaled_pcm.keys())
             self.assertGreater(len(sm._scaled_pcm[key]), 1000)
 
+        # Ensure start.wav (new task / new day chime) and done.wav exist and are distinct audio files
+        start_wav_path = os.path.join(sm.sounds_dir, 'start.wav')
+        done_wav_path = os.path.join(sm.sounds_dir, 'done.wav')
+        self.assertTrue(os.path.exists(start_wav_path))
+        self.assertTrue(os.path.exists(done_wav_path))
+        with open(start_wav_path, 'rb') as f_start, open(done_wav_path, 'rb') as f_done:
+            self.assertNotEqual(f_start.read(), f_done.read())
+
         # Verify sub-millisecond non-blocking UI call latency
         t0 = time.perf_counter()
         sm.play_hover(widget_id=101)
@@ -156,6 +164,7 @@ class TestUIAppLaunch(unittest.TestCase):
         panel = self.window.settings_panel
         self.assertIsNotNone(panel.ui_sounds_checkbox)
         self.assertIsNotNone(panel.ui_vol_slider)
+        self.assertIsNotNone(panel.hide_non_today_checkbox)
 
         # Verify SettingsPanel visual hierarchy order from top to bottom
         vbox = panel.layout()
@@ -163,6 +172,7 @@ class TestUIAppLaunch(unittest.TestCase):
         expected_sequence = [
             panel.theme_combo,
             panel.simple_checkbox,
+            panel.hide_non_today_checkbox,
             panel.sep,
             panel.hardcore_checkbox,
             panel.prayer_checkbox,
@@ -175,6 +185,30 @@ class TestUIAppLaunch(unittest.TestCase):
         ]
         indices = [ordered_widgets.index(w) for w in expected_sequence]
         self.assertEqual(indices, sorted(indices))
+
+        # Verify "Today's Tasks Only" (hide_non_today_enabled) filtering
+        from datetime import datetime
+        today_wd = datetime.now().weekday()
+        tomorrow_wd = (today_wd + 1) % 7
+        t_today = self.window.task_manager.add_task(
+            "Today Task", None, None, None, repeat_days=[today_wd], page_id=self.window.active_page_id
+        )
+        t_tomorrow = self.window.task_manager.add_task(
+            "Tomorrow Task", None, None, None, repeat_days=[tomorrow_wd], page_id=self.window.active_page_id
+        )
+        try:
+            self.window._toggle_hide_non_today(False)
+            self.assertIn(t_today['id'], self.window.task_cards)
+            self.assertIn(t_tomorrow['id'], self.window.task_cards)
+
+            self.window._toggle_hide_non_today(True)
+            self.assertIn(t_today['id'], self.window.task_cards)
+            self.assertNotIn(t_tomorrow['id'], self.window.task_cards)
+        finally:
+            self.window._toggle_hide_non_today(False)
+            self.window.task_manager.delete_task(t_today['id'])
+            self.window.task_manager.delete_task(t_tomorrow['id'])
+            self.window._load_tasks()
 
         self.window._on_ui_volume_changed(40)
         self.assertEqual(self.window.ui_volume, 40)
@@ -413,7 +447,7 @@ class TestUIAppLaunch(unittest.TestCase):
         from src.qt_components import THEME_OPTIONS
 
         # 1. Verify semantic version parsing and comparison
-        self.assertEqual(APP_VERSION, "1.4.0")
+        self.assertEqual(APP_VERSION, "1.4.1")
         self.assertEqual(parse_version("v1.3.0"), (1, 3, 0))
         self.assertEqual(parse_version("1.2"), (1, 2, 0))
         self.assertEqual(parse_version("v2.0.1-beta"), (2, 0, 1))
@@ -774,8 +808,12 @@ class TestUIAppLaunch(unittest.TestCase):
         self.assertTrue(self.window.update_timer.isSingleShot())
         self.assertGreaterEqual(self.window.update_timer.interval(), 1000)
 
-        # 4. Verify particle render loop pauses immediately when window is hidden
+        # 4. Verify particle render loop stays active across idle frames while window is open, and pauses immediately when hidden
         self.window.show()
+        self.assertTrue(self.window.particles.timer.isActive())
+        for _ in range(200):
+            self.window.particles.animate()
+        self.assertTrue(self.window.particles.timer.isActive())
         self.window.hide()
         self.assertFalse(self.window.particles.timer.isActive())
 
