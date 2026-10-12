@@ -1217,11 +1217,13 @@ class DailyTasksWindow(QMainWindow):
         start_str = task.get('start_time')
         end_str = task.get('end_time')
         now_secs = now.hour * 3600 + now.minute * 60 + now.second
+        is_before_start = False
         if not start_str:
             is_within_time = True
         elif not end_str:
             try:
                 s_secs = _parse_hhmm_to_secs(start_str)
+                is_before_start = now_secs < s_secs
                 is_within_time = now_secs >= s_secs
             except ValueError:
                 is_within_time = True
@@ -1234,9 +1236,21 @@ class DailyTasksWindow(QMainWindow):
                         s_secs -= 86400
                     else:
                         e_secs += 86400
+                is_before_start = now_secs < s_secs
                 is_within_time = s_secs <= now_secs <= e_secs
             except ValueError:
                 is_within_time = True
+
+        # If start time is in the future, task is strictly PENDING and never clickable
+        if is_before_start:
+            if current_status != 'pending':
+                self.task_manager.update_task_status(task['id'], 'pending')
+                task['status'] = 'pending'
+                task.pop('completed_at', None)
+                if task['id'] in self.task_cards:
+                    self.task_cards[task['id']].update_task(task)
+                self._update_app_icon()
+            return
         
         # === STATE MACHINE TRANSITIONS ===
         new_status = None
@@ -1257,10 +1271,10 @@ class DailyTasksWindow(QMainWindow):
         
         # DONE → Undo based on current time
         elif current_status == 'done':
-            if is_within_time:
-                new_status = 'active'  # Still in time window
+            if is_within_time or not end_str:
+                new_status = 'active'  # Still in time window (or no end time)
             else:
-                new_status = 'failed'  # Past time window
+                new_status = 'failed'  # Past end time window
         
         if new_status is None:
             return
@@ -1307,6 +1321,7 @@ class DailyTasksWindow(QMainWindow):
                     page_id=self.active_page_id
                 )
                 self._load_tasks()
+                self._schedule_next_tick()
         except Exception as e:
             ModernDialogs.show_message(self, "Error", f"Failed to open Add Task dialog:\n{str(e)}", theme=self.current_theme)
             import traceback
@@ -1730,6 +1745,7 @@ class DailyTasksWindow(QMainWindow):
         self.task_manager.synchronize_task_statuses()
         self._load_tasks()
         self._update_app_icon()
+        self._schedule_next_tick()
         
     def _toggle_dnd(self, enabled):
         """Toggle Do Not Disturb mode"""

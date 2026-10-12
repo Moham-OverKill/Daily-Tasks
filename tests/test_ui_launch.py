@@ -556,12 +556,12 @@ class TestUIAppLaunch(unittest.TestCase):
         self.assertFalse(new_dlg.end_picker_widget.isEnabled())
         new_dlg.deleteLater()
 
-        # 4. Verify TaskCard time_label formatting for All Day, Start-Only, and Full Window
+        # 4. Verify TaskCard time_label formatting for untimed (empty), Start-Only, and Full Window
         card_all_day = TaskCard({
             'id': 'c-all-day', 'name': 'All Day', 'start_time': None, 'end_time': None,
             'status': 'active', 'repeat_days': [0, 1, 2, 3, 4, 5, 6]
         })
-        self.assertEqual(card_all_day.time_label.text(), "All Day")
+        self.assertEqual(card_all_day.time_label.text(), "")
 
         card_start_only = TaskCard({
             'id': 'c-start-only', 'name': 'Start Only', 'start_time': '14:15', 'end_time': None,
@@ -582,6 +582,27 @@ class TestUIAppLaunch(unittest.TestCase):
         self.assertEqual(t_all_day['status'], 'done')
         self.window._on_task_clicked(t_all_day)
         self.assertEqual(t_all_day['status'], 'active')
+
+        # Editing a DONE or FAILED task to start in the future (with no end time) must reset it to PENDING and make it unclickable
+        future_dt = datetime.now() + timedelta(minutes=10)
+        if future_dt.date() == datetime.now().date():
+            future_str = future_dt.strftime("%H:%M")
+            self.window.hardcore_mode_enabled = False
+            tm.update_task_status(t_all_day['id'], 'done')
+            tm.update_task_details(t_all_day['id'], "All Day Test", future_str, None, "📝", [0, 1, 2, 3, 4, 5, 6])
+            self.assertEqual(tm.get_task_by_id(t_all_day['id'])['status'], 'pending')
+            self.window._on_task_clicked(tm.get_task_by_id(t_all_day['id']))
+            self.assertEqual(tm.get_task_by_id(t_all_day['id'])['status'], 'pending')
+
+            tm.update_task_status(t_all_day['id'], 'failed')
+            tm.update_task_details(t_all_day['id'], "All Day Test", future_str, None, "📝", [0, 1, 2, 3, 4, 5, 6])
+            self.assertEqual(tm.get_task_by_id(t_all_day['id'])['status'], 'pending')
+            self.window._on_task_clicked(tm.get_task_by_id(t_all_day['id']))
+            self.assertEqual(tm.get_task_by_id(t_all_day['id'])['status'], 'pending')
+
+            # Reset back to untimed active for subsequent checks
+            tm.update_task_details(t_all_day['id'], "All Day Test", None, None, "📝", [0, 1, 2, 3, 4, 5, 6])
+            self.assertEqual(tm.get_task_by_id(t_all_day['id'])['status'], 'active')
 
         # Start-only task in the past -> immediately active and never fails
         past_dt = datetime.now() - timedelta(minutes=5)

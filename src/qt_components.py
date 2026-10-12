@@ -1261,9 +1261,9 @@ class TaskCard(QFrame):
             self.icon_label.setText('❓')
 
     def _format_time_range(self, start, end):
-        """Format task start/end time range supporting All Day and Start-only modes"""
+        """Format task start/end time range (empty when no start/end timers are set)"""
         if not start:
-            return "All Day"
+            return ""
         if not end:
             return f"Starts {self._format_time(start)}"
         return f"{self._format_time(start)} — {self._format_time(end)}"
@@ -1603,7 +1603,7 @@ class TaskCard(QFrame):
     def mousePressEvent(self, event):
         """Handle click to toggle task status"""
         if event.button() == Qt.LeftButton:
-            if self.status != 'pending':
+            if self.status not in ('pending', 'disabled') and not getattr(self, '_is_ghost_mode', False):
                 self._animate_press()
                 self.clicked.emit()
                 

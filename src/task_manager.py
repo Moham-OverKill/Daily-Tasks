@@ -466,14 +466,20 @@ class TaskManager:
         if task_id.startswith('global_') and task_id in self.global_prayers:
             task = self.global_prayers[task_id]
             old_img = task.get('image_path')
+            schedule_changed = (
+                task.get('start_time') != start_time
+                or task.get('end_time') != end_time
+                or (repeat_days is not None and task.get('repeat_days') != repeat_days)
+            )
             task['name'] = name
             task['start_time'] = start_time
             task['end_time'] = end_time
             task['image_path'] = image_path
             if repeat_days is not None:
                 task['repeat_days'] = repeat_days
-            if task['status'] == 'failed':
+            if task['status'] == 'failed' or schedule_changed:
                 task['status'] = 'pending'
+                task.pop('completed_at', None)
             self.check_state_consistency(task, save=False)
             self.save_tasks()
             if old_img and old_img != image_path:
@@ -484,14 +490,20 @@ class TaskManager:
             for task in page['tasks']:
                 if task['id'] == task_id:
                     old_img = task.get('image_path')
+                    schedule_changed = (
+                        task.get('start_time') != start_time
+                        or task.get('end_time') != end_time
+                        or (repeat_days is not None and task.get('repeat_days') != repeat_days)
+                    )
                     task['name'] = name
                     task['start_time'] = start_time
                     task['end_time'] = end_time
                     task['image_path'] = image_path
                     if repeat_days is not None:
                         task['repeat_days'] = repeat_days
-                    if task['status'] == 'failed':
+                    if task['status'] == 'failed' or schedule_changed:
                         task['status'] = 'pending'
+                        task.pop('completed_at', None)
                     self.check_state_consistency(task, save=False)
                     self.save_tasks()
                     if old_img and old_img != image_path:
@@ -517,17 +529,15 @@ class TaskManager:
             return 'disabled', False
 
         if now.weekday() not in repeat_days:
-            if task.get('status') in ['active', 'failed']:
+            if task.get('status') in ['active', 'failed', 'done', 'disabled']:
                 task['status'] = 'pending'
+                task.pop('completed_at', None)
                 if save:
                     self.save_tasks()
                 return 'pending', True
             return task.get('status', 'pending'), False
 
         current_status = task.get('status', 'pending')
-        if current_status == 'done':
-            return 'done', False
-
         start_str = task.get('start_time')
         end_str = task.get('end_time')
         now_secs = now.hour * 3600 + now.minute * 60 + now.second + (0.000001 if now.microsecond else 0.0)
@@ -535,6 +545,8 @@ class TaskManager:
 
         # Case 1: Both Start & End OFF -> All-Day Active on scheduled days
         if not start_str:
+            if current_status == 'done':
+                return 'done', False
             new_status = 'active'
         # Case 2: Start ON, End OFF -> Pending before start_time, Active afterwards (cannot fail)
         elif not end_str:
@@ -544,6 +556,9 @@ class TaskManager:
                 return current_status, False
             if now_secs < start_secs:
                 new_status = 'pending'
+                task.pop('completed_at', None)
+            elif current_status == 'done':
+                return 'done', False
             else:
                 new_status = 'active'
         # Case 3: Both Start & End ON -> Full time window with deadline
@@ -562,8 +577,10 @@ class TaskManager:
                     end_secs += 86400
 
             if now_secs < start_secs:
-                if current_status in ['active', 'failed', 'disabled']:
-                    new_status = 'pending'
+                new_status = 'pending'
+                task.pop('completed_at', None)
+            elif current_status == 'done':
+                return 'done', False
             elif start_secs <= now_secs <= end_secs:
                 if current_status in ['pending', 'failed', 'disabled']:
                     new_status = 'active'
@@ -810,22 +827,21 @@ class TaskManager:
                 continue
 
             current_status = task.get('status', 'pending')
-
-            if current_status == 'done':
-                continue
-
             repeat_days = task.get('repeat_days', [0,1,2,3,4,5,6])
 
             if len(repeat_days) == 0:
                 new_status = 'disabled'
             elif current_weekday not in repeat_days:
                 new_status = 'pending'
+                task.pop('completed_at', None)
             else:
                 start_str = task.get('start_time')
                 end_str = task.get('end_time')
 
                 # Case 1: Both Start & End OFF -> All-Day Active
                 if not start_str:
+                    if current_status == 'done':
+                        continue
                     new_status = 'active'
                 # Case 2: Start ON, End OFF -> Pending before start, Active afterwards (cannot fail)
                 elif not end_str:
@@ -835,6 +851,9 @@ class TaskManager:
                         continue
                     if now_secs < start_secs:
                         new_status = 'pending'
+                        task.pop('completed_at', None)
+                    elif current_status == 'done':
+                        continue
                     else:
                         new_status = 'active'
                 # Case 3: Both Start & End ON -> Full time window
@@ -852,10 +871,13 @@ class TaskManager:
                         else:
                             end_secs += 86400
 
-                    if start_secs <= now_secs <= end_secs:
-                        new_status = 'active'
-                    elif now_secs < start_secs:
+                    if now_secs < start_secs:
                         new_status = 'pending'
+                        task.pop('completed_at', None)
+                    elif current_status == 'done':
+                        continue
+                    elif start_secs <= now_secs <= end_secs:
+                        new_status = 'active'
                     else:
                         new_status = 'failed'
 
