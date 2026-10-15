@@ -1,7 +1,7 @@
 [Setup]
 AppId={{D37F21F0-8B30-4C9D-9F31-5E2B9A1C8E50}}
 AppName=Daily Tasks
-#define MyAppVersion "1.4.1"
+#define MyAppVersion "1.4.2"
 AppVersion={#MyAppVersion}
 AppPublisher=Antigravity
 DefaultDirName={autopf}\DailyTasks

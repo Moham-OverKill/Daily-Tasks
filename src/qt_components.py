@@ -32,6 +32,12 @@ from .constants import APP_VERSION
 _TIME_FMT_CACHE = {}
 
 
+def _parse_hhmm_to_secs(time_str: str) -> int:
+    """Parse 'HH:MM' string to seconds into the day."""
+    parts = str(time_str).split(":")
+    return int(parts[0]) * 3600 + int(parts[1]) * 60
+
+
 
 
 def _draw_dashed_rounded_rect(
@@ -1103,7 +1109,7 @@ class TaskCard(QFrame):
         super().__init__(parent)
         self.task_data = task_data
         self.id = task_data['id']
-        self.status = task_data.get('status', 'pending')
+        self.status = 'pending' if self._is_future_start() else task_data.get('status', 'pending')
         
         # Animation state
         self.is_flashing = False
@@ -1133,7 +1139,7 @@ class TaskCard(QFrame):
         
         self.setMinimumSize(240, 250)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.setCursor(Qt.PointingHandCursor)
+        self.setCursor(Qt.ArrowCursor if (self.status == 'pending' or self._is_future_start()) else Qt.PointingHandCursor)
 
         self._setup_ui()
         self._update_visuals(animate=False)  # Initial load is instant
@@ -1142,7 +1148,7 @@ class TaskCard(QFrame):
         """Partial Refresh: Update card data and visuals without rebuilding"""
         old_status = self.status
         self.task_data = task_data
-        self.status = task_data.get('status', 'pending')
+        self.status = 'pending' if self._is_future_start() else task_data.get('status', 'pending')
         
         # Update Labels
         self.name_label.setText(task_data['name'])
@@ -1260,13 +1266,58 @@ class TaskCard(QFrame):
             self.icon_label.setFont(QFont("Segoe UI Emoji", 42))
             self.icon_label.setText('❓')
 
+    def _is_future_start(self) -> bool:
+        """Check if task has a start time today that has not arrived yet."""
+        start_str = self.task_data.get('start_time')
+        if not start_str:
+            return False
+
+        repeat_days = self.task_data.get('repeat_days', [0, 1, 2, 3, 4, 5, 6])
+        now = datetime.now()
+        if len(repeat_days) > 0 and now.weekday() not in repeat_days:
+            return False
+
+        try:
+            start_secs = _parse_hhmm_to_secs(start_str)
+        except (ValueError, KeyError):
+            return False
+
+        end_str = self.task_data.get('end_time')
+        if end_str:
+            try:
+                end_secs = _parse_hhmm_to_secs(end_str)
+                if end_secs < start_secs:
+                    if now.hour < 12:
+                        start_secs -= 86400
+            except (ValueError, KeyError):
+                pass
+
+        now_secs = now.hour * 3600 + now.minute * 60 + now.second
+        return now_secs < start_secs
+
     def _format_time_range(self, start, end):
-        """Format task start/end time range (empty when no start/end timers are set)"""
-        if not start:
+        """Format task start/end time range according to schedule and status rules."""
+        if not start and not end:
             return ""
-        if not end:
-            return f"Starts {self._format_time(start)}"
-        return f"{self._format_time(start)} — {self._format_time(end)}"
+
+        if getattr(self, 'status', None) == 'failed':
+            target_time = end or start
+            if target_time:
+                return f"Failed {self._format_time(target_time)}"
+
+        if start and not end:
+            if self._is_future_start():
+                return f"Starts {self._format_time(start)}"
+            else:
+                return f"Started {self._format_time(start)}"
+
+        if start and end:
+            return f"{self._format_time(start)} — {self._format_time(end)}"
+
+        if end and not start:
+            return f"Ends {self._format_time(end)}"
+
+        return ""
 
     def _format_time(self, time_str):
         """Format 24h time to 12h format using O(1) integer cache"""
@@ -1298,7 +1349,11 @@ class TaskCard(QFrame):
         spec = get_theme_spec(theme_key)
         is_light = spec["is_light"]
 
-        if self.status == 'done':
+        if self._is_future_start() or self.status == 'pending':
+            bg1 = QColor(*spec["card_hover_bg1"]) if hovered else QColor(*spec["card_bg1"])
+            bg2 = QColor(*spec["card_bg2"])
+            border = QColor(*spec["card_hover_border"]) if hovered else QColor(*spec["card_border"])
+        elif self.status == 'done':
             base_bg1 = QColor(*spec["done_bg1"])
             bg1 = base_bg1.darker(108) if (hovered and is_light) else (base_bg1.lighter(118) if hovered else base_bg1)
             bg2 = QColor(*spec["done_bg2"])
@@ -1381,6 +1436,7 @@ class TaskCard(QFrame):
         theme_key = getattr(self, 'current_theme', 'dark')
         repeat_days = self.task_data.get('repeat_days', [0,1,2,3,4,5,6])
         today_weekday = datetime.now().weekday()
+        is_future = self._is_future_start()
         style_key = (
             self.status,
             theme_key,
@@ -1388,6 +1444,7 @@ class TaskCard(QFrame):
             today_weekday,
             self.task_data.get('start_time'),
             self.task_data.get('end_time'),
+            is_future,
         )
         if getattr(self, '_last_style_key', None) == style_key:
             self._update_card_transform()
@@ -1400,28 +1457,30 @@ class TaskCard(QFrame):
         
         status_text_map = {'done': '✓ DONE', 'failed': '✗ FAILED', 'active': '● ACTIVE', 'pending': 'PENDING', 'disabled': 'DISABLED'}
         text = status_text_map.get(self.status, 'PENDING')
+        if is_future:
+            text = 'PENDING'
         
         if is_light:
-            if self.status == 'done':
+            if not is_future and self.status == 'done':
                 text_color, time_color = "#064E3B", "#065F46"
                 badge_css = "background-color: #059669; color: #FFFFFF; border: 1px solid #047857;"
-            elif self.status == 'active':
+            elif not is_future and self.status == 'active':
                 text_color, time_color = spec["text_main"], spec["text_muted"]
                 badge_css = f"background-color: {spec['accent_primary']}; color: #FFFFFF; border: 1px solid {spec['accent']};"
-            elif self.status == 'failed':
+            elif not is_future and self.status == 'failed':
                 text_color, time_color = "#881337", "#9F1239"
                 badge_css = "background-color: #E11D48; color: #FFFFFF; border: 1px solid #BE123C;"
             else:
                 text_color, time_color = spec["text_main"], spec["text_muted"]
                 badge_css = f"background-color: rgba({ar}, {ag}, {ab}, 28); color: {spec['text_main']}; border: 1px solid {spec['text_muted']};"
         else:
-            if self.status == 'done':
+            if not is_future and self.status == 'done':
                 text_color, time_color = "#ECFDF5", "#A7F3D0"
                 badge_css = "background-color: rgba(16, 185, 129, 38); color: #6EE7B7; border: 1px solid rgba(52, 211, 153, 115);"
-            elif self.status == 'active':
+            elif not is_future and self.status == 'active':
                 text_color, time_color = spec["text_main"], spec["text_muted"]
                 badge_css = f"background-color: rgba({ar}, {ag}, {ab}, 42); color: {spec['accent']}; border: 1px solid rgba({ar}, {ag}, {ab}, 145);"
-            elif self.status == 'failed':
+            elif not is_future and self.status == 'failed':
                 text_color, time_color = "#FFF1F2", "#FECDD3"
                 badge_css = "background-color: rgba(244, 63, 94, 40); color: #FDA4AF; border: 1px solid rgba(251, 113, 133, 115);"
             else:
@@ -1476,7 +1535,7 @@ class TaskCard(QFrame):
             self.setStyleSheet("#TaskCard { background: transparent; border: none; }")
         else:
             # Normal Mode
-            self.setCursor(Qt.PointingHandCursor if self.status != 'pending' else Qt.ArrowCursor)
+            self.setCursor(Qt.ArrowCursor if (self.status == 'pending' or is_future) else Qt.PointingHandCursor)
             self.time_label.setText(self._format_time_range(self.task_data.get('start_time'), self.task_data.get('end_time')))
             self.status_label.setStyleSheet(f"{badge_css} border-radius: 8px; padding: 3px 10px;")
             self.name_label.setStyleSheet(f"color: {text_color}; background: transparent;")
@@ -1559,6 +1618,9 @@ class TaskCard(QFrame):
         repeat_days = self.task_data.get('repeat_days', [0,1,2,3,4,5,6])
         if datetime.now().weekday() not in repeat_days or len(repeat_days) == 0:
             return
+
+        if self._is_future_start() or self.status in ('pending', 'disabled') or getattr(self, '_is_ghost_mode', False):
+            return
             
         self._set_hover(True)
         
@@ -1603,7 +1665,7 @@ class TaskCard(QFrame):
     def mousePressEvent(self, event):
         """Handle click to toggle task status"""
         if event.button() == Qt.LeftButton:
-            if self.status not in ('pending', 'disabled') and not getattr(self, '_is_ghost_mode', False):
+            if not self._is_future_start() and self.status not in ('pending', 'disabled') and not getattr(self, '_is_ghost_mode', False):
                 self._animate_press()
                 self.clicked.emit()
                 

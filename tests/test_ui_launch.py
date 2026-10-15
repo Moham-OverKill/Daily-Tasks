@@ -447,7 +447,7 @@ class TestUIAppLaunch(unittest.TestCase):
         from src.qt_components import THEME_OPTIONS
 
         # 1. Verify semantic version parsing and comparison
-        self.assertEqual(APP_VERSION, "1.4.1")
+        self.assertEqual(APP_VERSION, "1.4.2")
         self.assertEqual(parse_version("v1.3.0"), (1, 3, 0))
         self.assertEqual(parse_version("1.2"), (1, 2, 0))
         self.assertEqual(parse_version("v2.0.1-beta"), (2, 0, 1))
@@ -503,6 +503,7 @@ class TestUIAppLaunch(unittest.TestCase):
         from src.qt_components import AddTaskDialog, TaskCard
         from src.constants import ICON_CATEGORIES
         from src import share_handler
+        from PySide6.QtCore import Qt
 
         # 1. New task dialog must default both Start and End toggles to OFF
         new_dlg = AddTaskDialog(None, icon_categories=ICON_CATEGORIES, theme=self.window.current_theme)
@@ -556,20 +557,52 @@ class TestUIAppLaunch(unittest.TestCase):
         self.assertFalse(new_dlg.end_picker_widget.isEnabled())
         new_dlg.deleteLater()
 
-        # 4. Verify TaskCard time_label formatting for untimed (empty), Start-Only, and Full Window
+        # 4. Verify TaskCard time_label formatting for untimed (empty), Start-Only (Starts vs Started), and Failed
         card_all_day = TaskCard({
             'id': 'c-all-day', 'name': 'All Day', 'start_time': None, 'end_time': None,
             'status': 'active', 'repeat_days': [0, 1, 2, 3, 4, 5, 6]
         })
         self.assertEqual(card_all_day.time_label.text(), "")
 
-        card_start_only = TaskCard({
-            'id': 'c-start-only', 'name': 'Start Only', 'start_time': '14:15', 'end_time': None,
-            'status': 'active', 'repeat_days': [0, 1, 2, 3, 4, 5, 6]
+        # Future start task -> 'Starts [Time]', ArrowCursor, pending status
+        future_dt = datetime.now() + timedelta(hours=2)
+        if future_dt.date() == datetime.now().date():
+            f_str = future_dt.strftime("%H:%M")
+            card_future = TaskCard({
+                'id': 'c-future', 'name': 'Future Task', 'start_time': f_str, 'end_time': None,
+                'status': 'active', 'repeat_days': [0, 1, 2, 3, 4, 5, 6]
+            })
+            self.assertTrue(card_future._is_future_start())
+            self.assertEqual(card_future.status, 'pending')
+            self.assertEqual(card_future.cursor().shape(), Qt.ArrowCursor)
+            self.assertTrue(card_future.time_label.text().startswith("Starts "))
+            card_future.deleteLater()
+
+        # Past start task -> 'Started [Time]', PointingHandCursor, active status
+        past_dt = datetime.now() - timedelta(minutes=15)
+        if past_dt.date() == datetime.now().date():
+            p_str = past_dt.strftime("%H:%M")
+            card_ongoing = TaskCard({
+                'id': 'c-ongoing', 'name': 'Ongoing Task', 'start_time': p_str, 'end_time': None,
+                'status': 'active', 'repeat_days': [0, 1, 2, 3, 4, 5, 6]
+            })
+            self.assertFalse(card_ongoing._is_future_start())
+            self.assertEqual(card_ongoing.status, 'active')
+            self.assertEqual(card_ongoing.cursor().shape(), Qt.PointingHandCursor)
+            self.assertTrue(card_ongoing.time_label.text().startswith("Started "))
+            card_ongoing.deleteLater()
+
+        # Failed task -> 'Failed [End Time]'
+        fail_s = (datetime.now() - timedelta(hours=2)).strftime("%H:%M") if datetime.now().hour >= 2 else "00:01"
+        fail_e = (datetime.now() - timedelta(hours=1)).strftime("%H:%M") if datetime.now().hour >= 2 else "00:02"
+        card_failed = TaskCard({
+            'id': 'c-failed', 'name': 'Failed Task', 'start_time': fail_s, 'end_time': fail_e,
+            'status': 'failed', 'repeat_days': [0, 1, 2, 3, 4, 5, 6]
         })
-        self.assertEqual(card_start_only.time_label.text(), "Starts 2:15 PM")
+        self.assertEqual(card_failed.status, 'failed')
+        self.assertTrue(card_failed.time_label.text().startswith("Failed "))
+        card_failed.deleteLater()
         card_all_day.deleteLater()
-        card_start_only.deleteLater()
 
         # 5. Verify TaskManager state transitions and click/reset behavior
         tm = self.window.task_manager

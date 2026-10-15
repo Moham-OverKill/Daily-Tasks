@@ -22,11 +22,7 @@ EXCLUDED_BINARIES = [
     'Qt6Svg.dll',
     'd3dcompiler_47.dll',
     'qdirect2d.dll',
-    'libcrypto-3-x64.dll',
-    'libcrypto-3.dll',      # 5.1MB - Not needed (HTTPS handled by OS WinINet/Schannel)
-    'libssl-3.dll',         # 0.8MB - Not needed
-    '_ssl.pyd',
-    '_hashlib.pyd',
+
     '_lzma.pyd',
     '_bz2.pyd',
     'unicodedata.pyd',      # 1.1MB - Not needed at runtime

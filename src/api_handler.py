@@ -44,6 +44,12 @@ def _http_get_json(url, params=None, headers=None, timeout=3):
             h_inet = wininet.InternetOpenW("DailyTasks/2.5", 0, None, None, 0)
             if h_inet:
                 try:
+                    # Enforce strict connect/send/receive timeouts in milliseconds
+                    timeout_ms = ctypes.c_uint(max(1000, int(timeout * 1000)))
+                    wininet.InternetSetOptionW(ctypes.c_void_p(h_inet), 2, ctypes.byref(timeout_ms), ctypes.sizeof(timeout_ms)) # INTERNET_OPTION_CONNECT_TIMEOUT
+                    wininet.InternetSetOptionW(ctypes.c_void_p(h_inet), 5, ctypes.byref(timeout_ms), ctypes.sizeof(timeout_ms)) # INTERNET_OPTION_SEND_TIMEOUT
+                    wininet.InternetSetOptionW(ctypes.c_void_p(h_inet), 6, ctypes.byref(timeout_ms), ctypes.sizeof(timeout_ms)) # INTERNET_OPTION_RECEIVE_TIMEOUT
+
                     INTERNET_FLAG_RELOAD = 0x80000000
                     INTERNET_FLAG_NO_CACHE_WRITE = 0x04000000
                     hdr_str = None
@@ -55,17 +61,31 @@ def _http_get_json(url, params=None, headers=None, timeout=3):
                     )
                     if h_url:
                         try:
-                            chunks = []
-                            buf = ctypes.create_string_buffer(4096)
-                            bytes_read = ctypes.c_ulong(0)
-                            while wininet.InternetReadFile(
-                                ctypes.c_void_p(h_url), buf, 4096, ctypes.byref(bytes_read)
-                            ) and bytes_read.value > 0:
-                                chunks.append(buf.raw[:bytes_read.value])
-                            if chunks:
-                                return json.loads(b"".join(chunks).decode("utf-8", errors="replace"))
+                            # Verify HTTP status code 200
+                            status_buf = ctypes.create_unicode_buffer(32)
+                            status_len = ctypes.c_ulong(ctypes.sizeof(status_buf))
+                            if wininet.HttpQueryInfoW(
+                                ctypes.c_void_p(h_url), 19, status_buf, ctypes.byref(status_len), None
+                            ):
+                                try:
+                                    if int(status_buf.value.strip()) != 200:
+                                        h_url = None
+                                except ValueError:
+                                    pass
+
+                            if h_url:
+                                chunks = []
+                                buf = ctypes.create_string_buffer(4096)
+                                bytes_read = ctypes.c_ulong(0)
+                                while wininet.InternetReadFile(
+                                    ctypes.c_void_p(h_url), buf, 4096, ctypes.byref(bytes_read)
+                                ) and bytes_read.value > 0:
+                                    chunks.append(buf.raw[:bytes_read.value])
+                                if chunks:
+                                    return json.loads(b"".join(chunks).decode("utf-8", errors="replace"))
                         finally:
-                            wininet.InternetCloseHandle(ctypes.c_void_p(h_url))
+                            if h_url:
+                                wininet.InternetCloseHandle(ctypes.c_void_p(h_url))
                 finally:
                     wininet.InternetCloseHandle(ctypes.c_void_p(h_inet))
         except Exception:
