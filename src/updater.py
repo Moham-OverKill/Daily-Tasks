@@ -72,6 +72,12 @@ def _download_file_stream(url: str, dest_path: str, progress_cb=None, timeout: i
             h_inet = wininet.InternetOpenW(f"DailyTasks/{APP_VERSION}", 0, None, None, 0)
             if h_inet:
                 try:
+                    # Enforce strict connect/send/receive timeouts in milliseconds
+                    timeout_ms = ctypes.c_uint(max(1000, int(timeout * 1000)))
+                    wininet.InternetSetOptionW(ctypes.c_void_p(h_inet), 2, ctypes.byref(timeout_ms), ctypes.sizeof(timeout_ms)) # INTERNET_OPTION_CONNECT_TIMEOUT
+                    wininet.InternetSetOptionW(ctypes.c_void_p(h_inet), 5, ctypes.byref(timeout_ms), ctypes.sizeof(timeout_ms)) # INTERNET_OPTION_SEND_TIMEOUT
+                    wininet.InternetSetOptionW(ctypes.c_void_p(h_inet), 6, ctypes.byref(timeout_ms), ctypes.sizeof(timeout_ms)) # INTERNET_OPTION_RECEIVE_TIMEOUT
+
                     INTERNET_FLAG_RELOAD = 0x80000000
                     INTERNET_FLAG_NO_CACHE_WRITE = 0x04000000
                     hdrs = f"User-Agent: DailyTasks/{APP_VERSION}\r\nAccept: application/octet-stream\r\n"
@@ -88,54 +94,56 @@ def _download_file_stream(url: str, dest_path: str, progress_cb=None, timeout: i
                             # Query HTTP status code (HTTP_QUERY_STATUS_CODE = 19)
                             status_buf = ctypes.create_unicode_buffer(32)
                             status_len = ctypes.c_ulong(ctypes.sizeof(status_buf))
+                            status_ok = True
                             if wininet.HttpQueryInfoW(
                                 ctypes.c_void_p(h_url), 19, status_buf, ctypes.byref(status_len), None
                             ):
                                 try:
                                     status_code = int(status_buf.value.strip())
                                     if status_code >= 400:
-                                        return False
+                                        status_ok = False
                                 except ValueError:
                                     pass
 
-                            # Query Content-Length (HTTP_QUERY_CONTENT_LENGTH = 5)
-                            total_bytes = 0
-                            len_buf = ctypes.create_unicode_buffer(64)
-                            len_size = ctypes.c_ulong(ctypes.sizeof(len_buf))
-                            if wininet.HttpQueryInfoW(
-                                ctypes.c_void_p(h_url), 5, len_buf, ctypes.byref(len_size), None
-                            ):
-                                try:
-                                    total_bytes = int(len_buf.value.strip())
-                                except ValueError:
-                                    total_bytes = 0
-
-                            chunk_size = 65536
-                            buf = ctypes.create_string_buffer(chunk_size)
-                            bytes_read = ctypes.c_ulong(0)
-                            downloaded = 0
-                            last_pct = -1
-
-                            with open(part_path, "wb") as f:
-                                while (
-                                    wininet.InternetReadFile(
-                                        ctypes.c_void_p(h_url), buf, chunk_size, ctypes.byref(bytes_read)
-                                    )
-                                    and bytes_read.value > 0
+                            if status_ok:
+                                # Query Content-Length (HTTP_QUERY_CONTENT_LENGTH = 5)
+                                total_bytes = 0
+                                len_buf = ctypes.create_unicode_buffer(64)
+                                len_size = ctypes.c_ulong(ctypes.sizeof(len_buf))
+                                if wininet.HttpQueryInfoW(
+                                    ctypes.c_void_p(h_url), 5, len_buf, ctypes.byref(len_size), None
                                 ):
-                                    f.write(buf.raw[: bytes_read.value])
-                                    downloaded += bytes_read.value
-                                    if progress_cb and total_bytes > 0:
-                                        pct = max(0, min(100, int((downloaded * 100) // total_bytes)))
-                                        if pct != last_pct:
-                                            last_pct = pct
-                                            progress_cb(pct)
+                                    try:
+                                        total_bytes = int(len_buf.value.strip())
+                                    except ValueError:
+                                        total_bytes = 0
 
-                            if downloaded > 0:
-                                if progress_cb and last_pct < 100:
-                                    progress_cb(100)
-                                os.replace(part_path, dest_path)
-                                return True
+                                chunk_size = 65536
+                                buf = ctypes.create_string_buffer(chunk_size)
+                                bytes_read = ctypes.c_ulong(0)
+                                downloaded = 0
+                                last_pct = -1
+
+                                with open(part_path, "wb") as f:
+                                    while (
+                                        wininet.InternetReadFile(
+                                            ctypes.c_void_p(h_url), buf, chunk_size, ctypes.byref(bytes_read)
+                                        )
+                                        and bytes_read.value > 0
+                                    ):
+                                        f.write(buf.raw[: bytes_read.value])
+                                        downloaded += bytes_read.value
+                                        if progress_cb and total_bytes > 0:
+                                            pct = max(0, min(100, int((downloaded * 100) // total_bytes)))
+                                            if pct != last_pct:
+                                                last_pct = pct
+                                                progress_cb(pct)
+
+                                if downloaded > 0:
+                                    if progress_cb and last_pct < 100:
+                                        progress_cb(100)
+                                    os.replace(part_path, dest_path)
+                                    return True
                         finally:
                             wininet.InternetCloseHandle(ctypes.c_void_p(h_url))
                 finally:
@@ -228,11 +236,14 @@ class UpdateManager(QObject):
                 data = _http_get_json(
                     GITHUB_RELEASES_API_URL,
                     headers={"Accept": "application/vnd.github+json"},
-                    timeout=8,
+                    timeout=10,
                 )
                 if not isinstance(data, dict) or "tag_name" not in data:
                     if not silent:
-                        self.check_failed.emit("Could not reach GitHub Releases.")
+                        msg = "Could not reach GitHub Releases."
+                        if isinstance(data, dict) and "message" in data:
+                            msg = str(data["message"])
+                        self.check_failed.emit(msg)
                     return
 
                 tag_name = str(data.get("tag_name") or "").strip()
@@ -276,16 +287,29 @@ class UpdateManager(QObject):
 
         threading.Thread(target=_worker, daemon=True).start()
 
-    def download_and_install(self, download_url: str = "", version: str = "", expected_version: str = ""):
+    def download_and_install(self, *args, **kwargs):
         """
         Stream DailyTasksSetup.exe to %TEMP%\\DailyTasksUpdate\\DailyTasksSetup.exe,
         verify PE header ('MZ'), and launch the silent upgrade.
+        Flexible argument parsing prevents TypeError across caller versions.
         """
         if self._downloading:
             return
 
-        target_url = download_url or self.download_url
-        target_ver = version or expected_version or self.latest_version or APP_VERSION
+        target_url = kwargs.get("download_url") or ""
+        target_ver = kwargs.get("version") or kwargs.get("expected_version") or ""
+
+        for arg in args:
+            if isinstance(arg, str):
+                if arg.startswith("http://") or arg.startswith("https://"):
+                    if not target_url:
+                        target_url = arg
+                elif not target_ver:
+                    target_ver = arg
+
+        target_url = target_url or self.download_url
+        target_ver = target_ver or self.latest_version or APP_VERSION
+
         if not target_url:
             # If the release has no .exe attached, open the release page in browser
             try:
@@ -361,8 +385,12 @@ class UpdateManager(QObject):
                 close_fds=True,
             )
         except Exception as e:
-            self.download_failed.emit(f"Failed to launch installer: {e}")
-            return
+            # Fallback: attempt native OS startfile
+            try:
+                os.startfile(installer_path)
+            except Exception as start_err:
+                self.download_failed.emit(f"Failed to launch installer: {e} ({start_err})")
+                return
 
         if callable(self._on_quit_callback):
             self._on_quit_callback()
