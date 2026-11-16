@@ -1,7 +1,7 @@
 # Daily Tasks
 
-[![Download Installer](https://img.shields.io/badge/Download-DailyTasksSetup.exe-2ea44f?style=for-the-badge&logo=windows)](https://github.com/Moham-OverKill/Daily-Tasks/releases/download/v1.4.2/DailyTasksSetup.exe)
-[![Latest Release](https://img.shields.io/badge/Release-v1.4.2-blue?style=for-the-badge)](https://github.com/Moham-OverKill/Daily-Tasks/releases/tag/v1.4.2)
+[![Download Installer](https://img.shields.io/badge/Download-DailyTasksSetup.exe-2ea44f?style=for-the-badge&logo=windows)](https://github.com/Moham-OverKill/Daily-Tasks/releases/download/v1.5.0/DailyTasksSetup.exe)
+[![Latest Release](https://img.shields.io/badge/Release-v1.5.0-blue?style=for-the-badge)](https://github.com/Moham-OverKill/Daily-Tasks/releases/tag/v1.5.0)
 
 A simple Windows desktop app to help you organize your daily routines, build good habits, and stay on top of your schedule.
 
@@ -11,10 +11,12 @@ A simple Windows desktop app to help you organize your daily routines, build goo
 
 - **Daily Task Tracking**: Add your tasks, set their times, and check them off as you go.
 - **Routines & Pages**: Organize tasks into different lists—like Morning Routine, Work, Gym, or Study.
+- **Sidebar Notes**: Add quick notes and checklists directly under each routine page with customizable emoji badges.
 - **Reminders & Alerts**: Helpful sound alerts and notifications when it's time to begin a task.
 - **Prayer Times**: Shows your daily prayer schedule automatically throughout the day.
-- **Share Routines**: Export your routine to share with others or import someone else's setup in seconds.
-- **Themes**: Switch between Dark and Light mode whenever you like.
+- **Share Routines**: Export your routine and notes to share with others or import someone else's setup in seconds.
+- **14 Signature Themes**: Choose between 8 dark and 6 light themes with accurate dual-tone color previews.
+- **1,200+ Emojis**: Personalize tasks and notes with full emoji categories and smart search.
 
 ---
 
@@ -22,7 +24,7 @@ A simple Windows desktop app to help you organize your daily routines, build goo
 
 Click the link below to get the installer:
 
-**[Download DailyTasksSetup.exe](https://github.com/Moham-OverKill/Daily-Tasks/releases/download/v1.4.2/DailyTasksSetup.exe)**
+**[Download DailyTasksSetup.exe](https://github.com/Moham-OverKill/Daily-Tasks/releases/download/v1.5.0/DailyTasksSetup.exe)**
 
 Run the setup file, follow the quick installation steps, and start adding your tasks.
 

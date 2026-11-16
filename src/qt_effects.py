@@ -9,6 +9,7 @@ from PySide6.QtCore import Qt, QTimer, QPointF, QRectF
 from PySide6.QtGui import QPainter, QColor, QPen, QBrush, QPolygonF
 import random
 import math
+from src.qt_components import is_light_theme
 
 
 class ShockwaveRing:
@@ -193,6 +194,38 @@ class ParticleBackground(QWidget):
             QColor(2, 132, 199, 215),     # Horizon Blue (#0284C7)
             QColor(5, 150, 105, 215),     # Oasis Emerald (#059669)
         ],
+        'classic_light': [
+            QColor(37, 99, 235, 220),     # Classic Royal Blue (#2563EB)
+            QColor(100, 116, 139, 215),   # Cool Slate (#64748B)
+            QColor(2, 132, 199, 215),     # Sky Blue (#0284C7)
+            QColor(71, 85, 105, 210),     # Slate Gray (#475569)
+            QColor(16, 185, 129, 205),    # Soft Emerald (#10B981)
+            QColor(217, 119, 6, 205),     # Warm Amber (#D97706)
+        ],
+        'sage_light': [
+            QColor(5, 150, 105, 230),     # Botanical Forest (#059669)
+            QColor(16, 185, 129, 225),    # Matrix Mint (#10B981)
+            QColor(13, 148, 136, 225),    # Forest Teal (#0D9488)
+            QColor(4, 120, 87, 220),      # Deep Jade (#047857)
+            QColor(101, 163, 13, 215),    # Olive Lime (#65A30D)
+            QColor(14, 165, 233, 210),    # Clear Spring (#0EA5E9)
+        ],
+        'blossom_light': [
+            QColor(225, 29, 72, 230),     # Sakura Ruby (#E11D48)
+            QColor(244, 63, 94, 225),     # Rose Petal (#F43F5E)
+            QColor(219, 39, 119, 225),    # Magenta Rose (#DB2777)
+            QColor(234, 88, 12, 215),     # Warm Peach (#EA580C)
+            QColor(190, 24, 93, 220),     # Deep Berry (#BE185D)
+            QColor(217, 119, 6, 210),     # Golden Starlight (#D97706)
+        ],
+        'lavender_light': [
+            QColor(124, 58, 237, 230),    # Royal Amethyst (#7C3AED)
+            QColor(139, 92, 246, 225),    # Bright Violet (#8B5CF6)
+            QColor(168, 85, 247, 225),    # Soft Lilac (#A855F7)
+            QColor(79, 70, 229, 220),     # Indigo Starlight (#4F46E5)
+            QColor(217, 70, 239, 215),    # Fuchsia Glow (#D946EF)
+            QColor(2, 132, 199, 210),     # Celestial Blue (#0284C7)
+        ],
     }
 
     THEME_LINE_COLORS = {
@@ -206,6 +239,10 @@ class ParticleBackground(QWidget):
         'nord': (136, 192, 208, 48),
         'cyberpunk': (0, 240, 255, 58),
         'sunset_light': (234, 88, 12, 72),
+        'classic_light': (37, 99, 235, 65),
+        'sage_light': (5, 150, 105, 70),
+        'blossom_light': (225, 29, 72, 65),
+        'lavender_light': (124, 58, 237, 68),
     }
     
     # Confetti / Sparkle burst palette
@@ -310,6 +347,9 @@ class ParticleBackground(QWidget):
             if w > 100 and not self.simple_mode:
                 self.spawn_ambient(42)
             return
+
+        if self._prev_w == w and self._prev_h == h:
+            return
             
         for p in self.particles:
             if p.life is None:
@@ -371,7 +411,7 @@ class ParticleBackground(QWidget):
         if y is None:
             y = self.height() / 2
             
-        is_light = self.theme in ('light', 'sunset_light')
+        is_light = is_light_theme(self.theme)
         # Add dual neon shockwave rings (emerald + cyan)
         self.shockwaves.append(ShockwaveRing(x, y, QColor(16, 185, 129) if is_light else QColor(52, 211, 153)))
         ring_inner = ShockwaveRing(x, y, QColor(2, 132, 199) if is_light else QColor(56, 189, 248))
@@ -439,15 +479,11 @@ class ParticleBackground(QWidget):
         # ── Update particles ──────────────────────────────────────────────────
         mx, my = self.mouse_x, self.mouse_y
         has_mouse = (mx >= 0 and my >= 0 and self._mouse_idle_frames < self._MOUSE_REPEL_ACTIVE_FRAMES)
-        full_dirty = False
 
         for p in self.particles:
             p.update(w, h)
 
-            if p.life is not None:
-                if p.x < 260 or p.y < 44:
-                    full_dirty = True
-            else:
+            if p.life is None:
                 if has_mouse:
                     dx = p.x - mx
                     dy = p.y - my
@@ -468,19 +504,9 @@ class ParticleBackground(QWidget):
                     p.vx = (p.vx / speed) * 3.5
                     p.vy = (p.vy / speed) * 3.5
 
-        for sw in self.shockwaves:
-            if sw.x - sw.radius < 260 or sw.y - sw.radius < 44:
-                full_dirty = True
-
         # Remove dead particles
         self.particles = [p for p in self.particles if not p.dead]
-
-        # Dirty-region repaint: avoid invalidating the 250px Sidebar and 32px TitleBar
-        # unless a shockwave/confetti particle actually overlaps them.
-        if full_dirty or w <= 260 or h <= 40:
-            self.update()
-        else:
-            self.update(250, 32, w - 250, h - 32)
+        self.update()
         
     def paintEvent(self, event):
         """Draw shockwave rings, constellation lines, and glowing particles (culled to event.rect())"""
@@ -489,7 +515,7 @@ class ParticleBackground(QWidget):
 
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
-        is_light = self.theme in ('light', 'sunset_light')
+        is_light = is_light_theme(self.theme)
         palette = self.THEME_PALETTES.get(self.theme, self.THEME_PALETTES['dark'])
         lr, lg, lb, la = self.THEME_LINE_COLORS.get(self.theme, (144, 202, 249, 40))
         

@@ -9,7 +9,8 @@ from PySide6.QtWidgets import (
     QWidget, QGridLayout, QLineEdit, QTimeEdit, QDialog,
     QDialogButtonBox, QComboBox, QGraphicsOpacityEffect,
     QToolTip, QCheckBox, QSizePolicy, QFileDialog, QSlider,
-    QStyle, QStyleOptionButton, QStyledItemDelegate, QProgressBar
+    QStyle, QStyleOptionButton, QStyledItemDelegate, QProgressBar, QTextEdit,
+    QListWidget, QListWidgetItem, QListView, QAbstractItemView
 )
 from PySide6.QtGui import (
     QFont, QColor, QIntValidator, QPixmap, QCursor, QDrag, QPainter,
@@ -27,7 +28,7 @@ import os
 import sys
 import shutil
 import uuid
-from .constants import APP_VERSION
+from .constants import APP_VERSION, GLOBAL_EMOJI_ENGINE
 
 _TIME_FMT_CACHE = {}
 
@@ -246,6 +247,7 @@ QPushButton = AnimatedPushButton
 
 # Ordered list of (theme_key, display_name) for the Settings dropdown
 THEME_OPTIONS = [
+    # Dark Themes (8)
     ("dark", "Classic Dark"),
     ("midnight", "Midnight Blue"),
     ("nord", "Frost Blue"),
@@ -254,14 +256,22 @@ THEME_OPTIONS = [
     ("obsidian", "Obsidian Black"),
     ("nebula", "Cosmic Purple"),
     ("crimson", "Crimson Red"),
-    ("sunset_light", "Solar Light"),
-    ("light", "Aurora Light"),
+    # Light Themes (6)
+    ("classic_light", "Porcelain White"),
+    ("sunset_light", "Solar Sunset"),
+    ("light", "Aurora Sky"),
+    ("sage_light", "Sage Garden"),
+    ("blossom_light", "Cherry Blossom"),
+    ("lavender_light", "Lavender Mist"),
 ]
 
 THEME_DEFINITIONS = {
     "dark": {
         "name": "Classic Dark",
         "is_light": False,
+        "swatch_color": "#2B2B36",
+        "swatch_primary": "#2B2B36",
+        "swatch_accent": "#2196F3",
         "window_bg": "qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #0D0D0D, stop:0.5 #141414, stop:1 #1A1A1A)",
         "titlebar_bg": "#1A1A1A",
         "titlebar_border": "#333333",
@@ -297,6 +307,9 @@ THEME_DEFINITIONS = {
     "midnight": {
         "name": "Midnight Blue",
         "is_light": False,
+        "swatch_color": "#1E293B",
+        "swatch_primary": "#1E293B",
+        "swatch_accent": "#38BDF8",
         "window_bg": "qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #080C14, stop:0.5 #0D1424, stop:1 #0F172A)",
         "titlebar_bg": "#080C14",
         "titlebar_border": "rgba(148, 163, 184, 28)",
@@ -332,6 +345,9 @@ THEME_DEFINITIONS = {
     "obsidian": {
         "name": "Obsidian Black",
         "is_light": False,
+        "swatch_color": "#181824",
+        "swatch_primary": "#181824",
+        "swatch_accent": "#818CF8",
         "window_bg": "qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #000000, stop:0.55 #040407, stop:1 #09090F)",
         "titlebar_bg": "#000000",
         "titlebar_border": "rgba(129, 140, 248, 34)",
@@ -365,8 +381,11 @@ THEME_DEFINITIONS = {
         "failed_border": (251, 113, 133, 210),
     },
     "light": {
-        "name": "Aurora Light",
+        "name": "Aurora Sky",
         "is_light": True,
+        "swatch_color": "#E0F2FE",
+        "swatch_primary": "#E0F2FE",
+        "swatch_accent": "#0284C7",
         "window_bg": "qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #DBEAFE, stop:0.5 #E2E8F0, stop:1 #D1FAE5)",
         "titlebar_bg": "qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #DBEAFE, stop:0.5 #E2E8F0, stop:1 #D1FAE5)",
         "titlebar_border": "#94A3B8",
@@ -402,6 +421,9 @@ THEME_DEFINITIONS = {
     "nebula": {
         "name": "Cosmic Purple",
         "is_light": False,
+        "swatch_color": "#3B0764",
+        "swatch_primary": "#3B0764",
+        "swatch_accent": "#E879F9",
         "window_bg": "qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #0F071E, stop:0.5 #1A0B2E, stop:1 #120924)",
         "titlebar_bg": "#0C0517",
         "titlebar_border": "rgba(232, 121, 249, 38)",
@@ -437,6 +459,9 @@ THEME_DEFINITIONS = {
     "emerald": {
         "name": "Emerald Green",
         "is_light": False,
+        "swatch_color": "#064E3B",
+        "swatch_primary": "#064E3B",
+        "swatch_accent": "#34D399",
         "window_bg": "qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #04130E, stop:0.5 #062018, stop:1 #071914)",
         "titlebar_bg": "#030F0B",
         "titlebar_border": "rgba(52, 211, 153, 38)",
@@ -472,6 +497,9 @@ THEME_DEFINITIONS = {
     "crimson": {
         "name": "Crimson Red",
         "is_light": False,
+        "swatch_color": "#4C0519",
+        "swatch_primary": "#4C0519",
+        "swatch_accent": "#FB7185",
         "window_bg": "qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #16070B, stop:0.5 #240B13, stop:1 #1A090E)",
         "titlebar_bg": "#110508",
         "titlebar_border": "rgba(251, 113, 133, 38)",
@@ -507,6 +535,9 @@ THEME_DEFINITIONS = {
     "nord": {
         "name": "Frost Blue",
         "is_light": False,
+        "swatch_color": "#3B4252",
+        "swatch_primary": "#3B4252",
+        "swatch_accent": "#88C0D0",
         "window_bg": "qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #1E222A, stop:0.5 #242933, stop:1 #2E3440)",
         "titlebar_bg": "#191D24",
         "titlebar_border": "#3B4252",
@@ -542,6 +573,9 @@ THEME_DEFINITIONS = {
     "cyberpunk": {
         "name": "Neon Cyan",
         "is_light": False,
+        "swatch_color": "#4C1D95",
+        "swatch_primary": "#4C1D95",
+        "swatch_accent": "#00F0FF",
         "window_bg": "qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #0D0221, stop:0.5 #150734, stop:1 #1F093D)",
         "titlebar_bg": "#090117",
         "titlebar_border": "rgba(0, 240, 255, 55)",
@@ -575,8 +609,11 @@ THEME_DEFINITIONS = {
         "failed_border": (255, 42, 133, 240),
     },
     "sunset_light": {
-        "name": "Solar Light",
+        "name": "Solar Sunset",
         "is_light": True,
+        "swatch_color": "#FFEDD5",
+        "swatch_primary": "#FFEDD5",
+        "swatch_accent": "#EA580C",
         "window_bg": "qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #FFEDD5, stop:0.5 #FCE7F3, stop:1 #FEF3C7)",
         "titlebar_bg": "qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #FFEDD5, stop:0.5 #FCE7F3, stop:1 #FEF3C7)",
         "titlebar_border": "#FDBA74",
@@ -608,6 +645,158 @@ THEME_DEFINITIONS = {
         "failed_bg1": (254, 205, 211, 185),
         "failed_bg2": (253, 164, 175, 198),
         "failed_border": (225, 29, 72, 240),
+    },
+    "classic_light": {
+        "name": "Porcelain White",
+        "is_light": True,
+        "swatch_color": "#F1F5F9",
+        "swatch_primary": "#F1F5F9",
+        "swatch_accent": "#2563EB",
+        "window_bg": "qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #F8FAFC, stop:0.5 #F1F5F9, stop:1 #E2E8F0)",
+        "titlebar_bg": "qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #F8FAFC, stop:1 #F1F5F9)",
+        "titlebar_border": "#CBD5E1",
+        "title_fg": "#0F172A",
+        "sidebar_bg": "qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 rgba(248, 250, 252, 230), stop:1 rgba(241, 245, 249, 240))",
+        "sidebar_border": "rgba(148, 163, 184, 120)",
+        "panel_bg": "rgba(255, 255, 255, 252)",
+        "panel_border": "#CBD5E1",
+        "dialog_bg": "#FFFFFF",
+        "input_bg": "#F8FAFC",
+        "input_border": "#CBD5E1",
+        "text_main": "#0F172A",
+        "text_muted": "#64748B",
+        "accent": "#2563EB",
+        "accent_rgb": (37, 99, 235),
+        "accent_primary": "#1D4ED8",
+        "accent_hover": "#3B82F6",
+        "card_bg1": (255, 255, 255, 220),
+        "card_bg2": (241, 245, 249, 235),
+        "card_hover_bg1": (241, 245, 249, 245),
+        "card_border": (148, 163, 184, 140),
+        "card_hover_border": (37, 99, 235, 210),
+        "active_bg1": (219, 234, 254, 210),
+        "active_bg2": (191, 219, 254, 225),
+        "active_border": (37, 99, 235, 235),
+        "done_bg1": (220, 252, 231, 210),
+        "done_bg2": (187, 247, 208, 225),
+        "done_border": (22, 163, 74, 230),
+        "failed_bg1": (254, 226, 226, 210),
+        "failed_bg2": (254, 202, 202, 225),
+        "failed_border": (220, 38, 38, 230),
+    },
+    "sage_light": {
+        "name": "Sage Garden",
+        "is_light": True,
+        "swatch_color": "#DCFCE7",
+        "swatch_primary": "#DCFCE7",
+        "swatch_accent": "#059669",
+        "window_bg": "qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #F0FDF4, stop:0.5 #ECFDF5, stop:1 #D1FAE5)",
+        "titlebar_bg": "qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #F0FDF4, stop:1 #ECFDF5)",
+        "titlebar_border": "#A7F3D0",
+        "title_fg": "#064E3B",
+        "sidebar_bg": "qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 rgba(240, 253, 244, 225), stop:1 rgba(236, 253, 245, 238))",
+        "sidebar_border": "rgba(52, 211, 153, 115)",
+        "panel_bg": "rgba(255, 255, 255, 252)",
+        "panel_border": "#A7F3D0",
+        "dialog_bg": "#F0FDF4",
+        "input_bg": "#FFFFFF",
+        "input_border": "#A7F3D0",
+        "text_main": "#064E3B",
+        "text_muted": "#047857",
+        "accent": "#059669",
+        "accent_rgb": (5, 150, 105),
+        "accent_primary": "#047857",
+        "accent_hover": "#10B981",
+        "card_bg1": (255, 255, 255, 220),
+        "card_bg2": (236, 253, 245, 235),
+        "card_hover_bg1": (236, 253, 245, 245),
+        "card_border": (52, 211, 153, 140),
+        "card_hover_border": (5, 150, 105, 220),
+        "active_bg1": (209, 250, 229, 215),
+        "active_bg2": (167, 243, 208, 225),
+        "active_border": (5, 150, 105, 235),
+        "done_bg1": (220, 252, 231, 210),
+        "done_bg2": (187, 247, 208, 225),
+        "done_border": (16, 185, 129, 230),
+        "failed_bg1": (254, 226, 226, 210),
+        "failed_bg2": (254, 202, 202, 225),
+        "failed_border": (225, 29, 72, 230),
+    },
+    "blossom_light": {
+        "name": "Cherry Blossom",
+        "is_light": True,
+        "swatch_color": "#FFE4E6",
+        "swatch_primary": "#FFE4E6",
+        "swatch_accent": "#E11D48",
+        "window_bg": "qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #FFF1F2, stop:0.5 #FCE7F3, stop:1 #FFE4E6)",
+        "titlebar_bg": "qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #FFF1F2, stop:1 #FCE7F3)",
+        "titlebar_border": "#FECDD3",
+        "title_fg": "#881337",
+        "sidebar_bg": "qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 rgba(255, 241, 242, 225), stop:1 rgba(252, 231, 243, 238))",
+        "sidebar_border": "rgba(244, 63, 94, 115)",
+        "panel_bg": "rgba(255, 255, 255, 252)",
+        "panel_border": "#FECDD3",
+        "dialog_bg": "#FFF1F2",
+        "input_bg": "#FFFFFF",
+        "input_border": "#FECDD3",
+        "text_main": "#881337",
+        "text_muted": "#BE123C",
+        "accent": "#E11D48",
+        "accent_rgb": (225, 29, 72),
+        "accent_primary": "#BE123C",
+        "accent_hover": "#F43F5E",
+        "card_bg1": (255, 255, 255, 220),
+        "card_bg2": (255, 228, 230, 235),
+        "card_hover_bg1": (254, 205, 211, 235),
+        "card_border": (251, 113, 133, 140),
+        "card_hover_border": (225, 29, 72, 220),
+        "active_bg1": (254, 205, 211, 210),
+        "active_bg2": (253, 164, 175, 225),
+        "active_border": (225, 29, 72, 235),
+        "done_bg1": (209, 250, 229, 210),
+        "done_bg2": (167, 243, 208, 225),
+        "done_border": (5, 150, 105, 230),
+        "failed_bg1": (255, 228, 230, 210),
+        "failed_bg2": (254, 205, 211, 225),
+        "failed_border": (225, 29, 72, 235),
+    },
+    "lavender_light": {
+        "name": "Lavender Mist",
+        "is_light": True,
+        "swatch_color": "#F3E8FF",
+        "swatch_primary": "#F3E8FF",
+        "swatch_accent": "#7C3AED",
+        "window_bg": "qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #FAF5FF, stop:0.5 #F3E8FF, stop:1 #EDE9FE)",
+        "titlebar_bg": "qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #FAF5FF, stop:1 #F3E8FF)",
+        "titlebar_border": "#DDD6FE",
+        "title_fg": "#581C87",
+        "sidebar_bg": "qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 rgba(250, 245, 255, 225), stop:1 rgba(243, 232, 255, 238))",
+        "sidebar_border": "rgba(168, 85, 247, 115)",
+        "panel_bg": "rgba(255, 255, 255, 252)",
+        "panel_border": "#DDD6FE",
+        "dialog_bg": "#FAF5FF",
+        "input_bg": "#FFFFFF",
+        "input_border": "#DDD6FE",
+        "text_main": "#581C87",
+        "text_muted": "#7E22CE",
+        "accent": "#7C3AED",
+        "accent_rgb": (124, 58, 237),
+        "accent_primary": "#6D28D9",
+        "accent_hover": "#8B5CF6",
+        "card_bg1": (255, 255, 255, 220),
+        "card_bg2": (243, 232, 255, 235),
+        "card_hover_bg1": (237, 233, 254, 235),
+        "card_border": (192, 132, 252, 140),
+        "card_hover_border": (124, 58, 237, 220),
+        "active_bg1": (237, 233, 254, 210),
+        "active_bg2": (221, 214, 254, 225),
+        "active_border": (124, 58, 237, 235),
+        "done_bg1": (209, 250, 229, 210),
+        "done_bg2": (167, 243, 208, 225),
+        "done_border": (5, 150, 105, 230),
+        "failed_bg1": (254, 226, 226, 210),
+        "failed_bg2": (254, 202, 202, 225),
+        "failed_border": (225, 29, 72, 230),
     },
 }
 
@@ -2332,6 +2521,404 @@ class AddPageButton(AnimatedPushButton):
         painter.end()
 
 
+class NoteHoverCard(QFrame):
+    """
+    Sleek floating popover displaying note Title and Description with solid, readable background
+    and smooth opacity & subtle slide-in animations.
+    """
+    def __init__(self, parent=None):
+        super().__init__(parent, Qt.ToolTip | Qt.FramelessWindowHint)
+        self.setObjectName("NoteHoverCard")
+        self.setAttribute(Qt.WA_ShowWithoutActivating, True)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.setAttribute(Qt.WA_StyledBackground, True)
+        self.setFixedWidth(220)
+
+        self._opacity_effect = QGraphicsOpacityEffect(self)
+        self.setGraphicsEffect(self._opacity_effect)
+        self._fade_anim = None
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 10, 12, 10)
+        layout.setSpacing(4)
+
+        self.title_label = QLabel()
+        self.title_label.setFont(QFont("Segoe UI", 10, QFont.Bold))
+        self.title_label.setWordWrap(True)
+        layout.addWidget(self.title_label)
+
+        self.desc_label = QLabel()
+        self.desc_label.setFont(QFont("Segoe UI", 9))
+        self.desc_label.setWordWrap(True)
+        layout.addWidget(self.desc_label)
+
+    def set_note_content(self, title: str, description: str, theme: str = 'dark'):
+        self.title_label.setText(title)
+        if description:
+            self.desc_label.setText(description)
+            self.desc_label.show()
+        else:
+            self.desc_label.hide()
+
+        spec = get_theme_spec(theme)
+        is_light = spec["is_light"]
+        ar, ag, ab = spec["accent_rgb"]
+
+        if is_light:
+            bg = "#FFFFFF"
+            border = f"rgba({ar}, {ag}, {ab}, 160)"
+            t_col = spec["text_main"]
+            d_col = "#475569"
+        else:
+            bg = "#1A1D24"
+            border = f"rgba({ar}, {ag}, {ab}, 180)"
+            t_col = spec["text_main"]
+            d_col = spec["text_muted"]
+
+        self.setStyleSheet(f"""
+            QFrame#NoteHoverCard {{
+                background-color: {bg};
+                border: 1.5px solid {border};
+                border-radius: 8px;
+            }}
+        """)
+        self.title_label.setStyleSheet(f"color: {t_col}; background: transparent; font-weight: bold;")
+        self.desc_label.setStyleSheet(f"color: {d_col}; background: transparent;")
+        self.adjustSize()
+
+    def show_animated(self, target_pos: QPoint):
+        if self._fade_anim is not None:
+            self._fade_anim.stop()
+
+        self._fade_anim = QVariantAnimation(self)
+        self._fade_anim.setDuration(140)
+        self._fade_anim.setEasingCurve(QEasingCurve.OutCubic)
+        start_op = self._opacity_effect.opacity() if self.isVisible() else 0.0
+        self._fade_anim.setStartValue(float(start_op))
+        self._fade_anim.setEndValue(1.0)
+
+        start_y = target_pos.y() + 4
+        def _on_step(v: float):
+            self._opacity_effect.setOpacity(v)
+            cur_y = int(start_y - 4 * v)
+            self.move(target_pos.x(), cur_y)
+
+        self._fade_anim.valueChanged.connect(_on_step)
+        self.move(target_pos.x(), start_y)
+        self._opacity_effect.setOpacity(start_op)
+        self.show()
+        self._fade_anim.start()
+
+    def hide_animated(self):
+        if not self.isVisible():
+            return
+        if self._fade_anim is not None:
+            self._fade_anim.stop()
+
+        self._fade_anim = QVariantAnimation(self)
+        self._fade_anim.setDuration(110)
+        self._fade_anim.setEasingCurve(QEasingCurve.InCubic)
+        start_op = self._opacity_effect.opacity()
+        self._fade_anim.setStartValue(float(start_op))
+        self._fade_anim.setEndValue(0.0)
+        self._fade_anim.valueChanged.connect(self._opacity_effect.setOpacity)
+        self._fade_anim.finished.connect(self.hide)
+        self._fade_anim.start()
+
+
+class NoteIconButton(AnimatedPushButton):
+    """
+    Compact 38x38 sidebar note icon rendered as Circle or Square with hover popover.
+    """
+    edit_requested = Signal(str)
+    delete_requested = Signal(str)
+
+    def __init__(self, note_data, parent=None):
+        super().__init__("", parent)
+        self.note_data = note_data
+        self.note_id = str(note_data.get('id', ''))
+        self.title = str(note_data.get('title', ''))
+        self.description = str(note_data.get('description', ''))
+        self.icon_val = str(note_data.get('icon', '📝'))
+        self.shape = note_data.get('shape', 'circle')
+        self.current_theme = 'dark'
+        self._hover_card = None
+
+        self.setFixedSize(38, 38)
+        self.setCursor(Qt.PointingHandCursor)
+
+    def update_note(self, note_data):
+        self.note_data = note_data
+        self.title = str(note_data.get('title', ''))
+        self.description = str(note_data.get('description', ''))
+        self.icon_val = str(note_data.get('icon', '📝'))
+        self.shape = note_data.get('shape', 'circle')
+        self.update()
+
+    def apply_theme(self, theme_key):
+        self.current_theme = theme_key
+        self.update()
+
+    def paintEvent(self, event):
+        w = self.width()
+        h = self.height()
+        if w <= 4 or h <= 4:
+            return
+
+        spec = get_theme_spec(self.current_theme)
+        is_light = spec["is_light"]
+        ar, ag, ab = spec["accent_rgb"]
+        t = self._hover_t
+        pt = self._press_t
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        painter.setRenderHint(QPainter.TextAntialiasing, True)
+        painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
+
+        # Smooth scale: 7% elevation on hover, 5% tactile depression on press
+        scale = 1.0 + (0.07 * t) - (0.05 * pt)
+        if abs(scale - 1.0) > 0.001:
+            cx = w * 0.5
+            cy = h * 0.5
+            painter.translate(cx, cy)
+            painter.scale(scale, scale)
+            painter.translate(-cx, -cy)
+
+        rect = QRectF(1.5, 1.5, w - 3.0, h - 3.0)
+        radius = (rect.width() * 0.5) if self.shape == 'circle' else 8.0
+
+        # Subtle outer glow halo on hover
+        if t > 0.01:
+            halo_pen = QPen(QColor(ar, ag, ab, int(45 * t)), 2.0 + 1.2 * t)
+            painter.setPen(halo_pen)
+            painter.setBrush(Qt.NoBrush)
+            painter.drawRoundedRect(rect, radius, radius)
+
+        # Smooth continuous color interpolation
+        if is_light:
+            base_bg = QColor(255, 255, 255, int(185 + 55 * t))
+            b_r = int(210 + (ar - 210) * t)
+            b_g = int(210 + (ag - 210) * t)
+            b_b = int(215 + (ab - 215) * t)
+            border_col = QColor(b_r, b_g, b_b, int(140 + 95 * t))
+        else:
+            bg_r = int(30 + (ar - 30) * 0.35 * t)
+            bg_g = int(41 + (ag - 41) * 0.35 * t)
+            bg_b = int(59 + (ab - 59) * 0.35 * t)
+            base_bg = QColor(bg_r, bg_g, bg_b, int(185 + 50 * t))
+            b_r = int(148 + (ar - 148) * t)
+            b_g = int(163 + (ag - 163) * t)
+            b_b = int(184 + (ab - 184) * t)
+            border_col = QColor(b_r, b_g, b_b, int(60 + 175 * t))
+
+        border_w = 1.0 + 0.6 * t
+        painter.setBrush(base_bg)
+        painter.setPen(QPen(border_col, border_w))
+        painter.drawRoundedRect(rect, radius, radius)
+
+        # Draw icon with optical baseline compensation (emojis lack alphabetical descenders)
+        float_y = 1.2 * t
+        text_lift = 1.2 + (1.2 * t)
+        is_path = any(s in self.icon_val.lower() for s in ['\\', '/', '.png', '.jpg', '.jpeg', '.webp'])
+        if is_path:
+            resolved_path = self.icon_val
+            if not os.path.isabs(resolved_path) and 'cache' in resolved_path:
+                appdata = os.getenv('APPDATA', os.path.expanduser('~'))
+                resolved_path = os.path.normpath(os.path.join(appdata, 'DailyTasks', resolved_path))
+            pix = QPixmap(resolved_path)
+            if not pix.isNull():
+                scaled = pix.scaled(22, 22, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                ix = int(rect.center().x() - scaled.width() * 0.5)
+                iy = int(rect.center().y() - scaled.height() * 0.5 - float_y)
+                painter.drawPixmap(ix, iy, scaled)
+            else:
+                f = QFont("Segoe UI Emoji", 14)
+                f.setStyleStrategy(QFont.PreferAntialias | QFont.PreferQuality)
+                painter.setFont(f)
+                painter.setPen(QColor(spec["text_main"]))
+                painter.drawText(rect.adjusted(0, -text_lift, 0, -text_lift), Qt.AlignCenter, "❓")
+        else:
+            f = QFont("Segoe UI Emoji", 17)
+            f.setStyleStrategy(QFont.PreferAntialias | QFont.PreferQuality)
+            painter.setFont(f)
+            painter.setPen(QColor(spec["text_main"]))
+            painter.drawText(rect.adjusted(0, -text_lift, 0, -text_lift), Qt.AlignCenter, self.icon_val)
+
+        if pt > 0.01:
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QColor(0, 0, 0, int(26 * pt)))
+            painter.drawRoundedRect(rect, radius, radius)
+
+        painter.end()
+
+    def enterEvent(self, event):
+        super().enterEvent(event)
+        self._show_hover_card()
+
+    def leaveEvent(self, event):
+        super().leaveEvent(event)
+        self._hide_hover_card()
+
+    def _show_hover_card(self):
+        if not self.title:
+            return
+        if self._hover_card is None:
+            self._hover_card = NoteHoverCard()
+        self._hover_card.set_note_content(self.title, self.description, self.current_theme)
+        self._hover_card.adjustSize()
+
+        card_w = self._hover_card.width()
+        card_h = self._hover_card.height()
+        btn_pos = self.mapToGlobal(QPoint(0, 0))
+
+        win = self.window()
+        win_pos = win.mapToGlobal(QPoint(0, 0)) if win else btn_pos
+        win_left = win_pos.x()
+        win_right = win_left + (win.width() if win else 1000)
+
+        # Center horizontally relative to button, clamped within window bounds
+        target_x = btn_pos.x() + (self.width() - card_w) // 2
+        target_x = max(win_left + 10, min(target_x, win_right - card_w - 10))
+
+        # Position directly ON TOP OF the note icon (6px spacing)
+        target_y = btn_pos.y() - card_h - 6
+        if win and win.isVisible() and btn_pos.y() > 0 and target_y < win_pos.y() + 10:
+            target_y = btn_pos.y() + self.height() + 6
+
+        self._hover_card.show_animated(QPoint(target_x, target_y))
+
+    def _hide_hover_card(self):
+        if self._hover_card:
+            self._hover_card.hide_animated()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.RightButton:
+            self._show_context_menu(event.globalPos())
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def _show_context_menu(self, global_pos):
+        self._hide_hover_card()
+        from PySide6.QtWidgets import QMenu
+        menu = QMenu(self)
+        spec = get_theme_spec(self.current_theme)
+        ar, ag, ab = spec["accent_rgb"]
+        menu.setStyleSheet(f"""
+            QMenu {{
+                background-color: {spec['dialog_bg']};
+                color: {spec['text_main']};
+                border: 1px solid {spec['input_border']};
+                border-radius: 8px;
+                padding: 4px;
+            }}
+            QMenu::item {{
+                padding: 6px 20px;
+                border-radius: 5px;
+            }}
+            QMenu::item:selected {{
+                background-color: rgba({ar}, {ag}, {ab}, 45);
+                color: {spec['accent']};
+            }}
+        """)
+        edit_action = menu.addAction("✏️  Edit")
+        menu.addSeparator()
+        delete_action = menu.addAction("🗑️  Delete")
+
+        action = menu.exec(global_pos)
+        if action == edit_action:
+            self.edit_requested.emit(self.note_id)
+        elif action == delete_action:
+            self.delete_requested.emit(self.note_id)
+
+    def cleanup(self):
+        self._hide_hover_card()
+        if self._hover_card:
+            self._hover_card.deleteLater()
+            self._hover_card = None
+
+
+class AddNoteButton(AnimatedPushButton):
+    """
+    Sidebar '+ Add Note' button rendered as a 38x38 square with a dashed border
+    and crisp vector '+' symbol, matching NoteIconButton dimensions.
+    """
+    def __init__(self, parent=None):
+        super().__init__("+", parent)
+        self.current_theme = "dark"
+        self.setFixedSize(38, 38)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setToolTip("Add Note")
+
+    def apply_theme(self, theme: str):
+        self.current_theme = theme
+        self.update()
+
+    def paintEvent(self, event):
+        w = self.width()
+        h = self.height()
+        if w <= 4 or h <= 4:
+            return
+
+        spec = get_theme_spec(self.current_theme)
+        is_light = spec["is_light"]
+        ar, ag, ab = spec["accent_rgb"]
+        t = self._hover_t
+        pt = self._press_t
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+
+        scale = 1.0 + (0.04 * t) - (0.04 * pt)
+        if abs(scale - 1.0) > 0.001:
+            cx = w * 0.5
+            cy = h * 0.5
+            painter.translate(cx, cy)
+            painter.scale(scale, scale)
+            painter.translate(-cx, -cy)
+
+        rect = QRectF(1.5, 1.5, w - 3.0, h - 3.0)
+
+        c_muted = QColor(spec["text_muted"])
+        c_acc = QColor(spec["accent"])
+
+        if is_light:
+            bg_col = QColor(255, 255, 255, int(155 + 60 * t))
+            border_col = QColor(ar, ag, ab, 220) if t > 0.2 else QColor(spec["input_border"])
+            plus_col = c_acc if t > 0.2 else c_muted
+        else:
+            bg_col = QColor(ar, ag, ab, int(22 + 35 * t)) if t > 0.2 else QColor(30, 41, 59, 130)
+            border_col = QColor(ar, ag, ab, 200) if t > 0.2 else QColor(148, 163, 184, 85)
+            plus_col = c_acc if t > 0.2 else c_muted
+
+        _draw_dashed_rounded_rect(
+            painter,
+            rect,
+            8.0,
+            bg_col,
+            border_col,
+            pen_w=1.4,
+            target_cycle_px=8.0,
+            solid=(t > 0.65),
+        )
+
+        if pt > 0.01:
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QColor(0, 0, 0, int(24 * pt)))
+            painter.drawRoundedRect(rect, 8.0, 8.0)
+
+        # Crisp vector '+' symbol
+        cx = rect.center().x()
+        cy = rect.center().y()
+        arm = 5.5
+        plus_pen = QPen(plus_col, 2.0, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
+        painter.setPen(plus_pen)
+        painter.drawLine(QPointF(cx - arm, cy), QPointF(cx + arm, cy))
+        painter.drawLine(QPointF(cx, cy - arm), QPointF(cx, cy + arm))
+        painter.end()
+
+
 class Sidebar(QFrame):
     """
     Semi-transparent sidebar with page navigation and controls.
@@ -2349,6 +2936,11 @@ class Sidebar(QFrame):
     page_mute_toggle = Signal(str)    # page_id
     page_reordered = Signal(list)     # new_order_list
     
+    # Note signals
+    note_add_clicked = Signal()
+    note_edit_requested = Signal(str)    # note_id
+    note_delete_requested = Signal(str)  # note_id
+    
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("Sidebar")
@@ -2356,6 +2948,7 @@ class Sidebar(QFrame):
         self.setFixedWidth(250)
         self.current_theme = 'dark'
         self._page_buttons = {}  # page_id -> PageButton
+        self._note_buttons = {}  # note_id -> NoteIconButton
         self._update_available = False
         self._update_version = ""
         
@@ -2367,6 +2960,17 @@ class Sidebar(QFrame):
         layout.setSpacing(6)
         layout.setContentsMargins(15, 15, 15, 15)
         
+        # ── 1. PAGES SECTION HEADER ──
+        pages_header = QHBoxLayout()
+        pages_header.setSpacing(6)
+        pages_header.setContentsMargins(2, 0, 2, 2)
+        
+        self.pages_header_label = QLabel("Pages")
+        self.pages_header_label.setFont(QFont("Segoe UI", 10, QFont.Bold))
+        pages_header.addWidget(self.pages_header_label)
+        pages_header.addStretch()
+        layout.addLayout(pages_header)
+
         # Scrollable page list (takes up all available space)
         self.page_scroll = QScrollArea()
         self.page_scroll.setWidgetResizable(True)
@@ -2408,6 +3012,67 @@ class Sidebar(QFrame):
         self.page_scroll.setWidget(self.page_list_widget)
         layout.addWidget(self.page_scroll, 1)  # stretch=1 fills space
         
+        # ── 2. DIVIDER ──
+        self.sidebar_divider = QFrame()
+        self.sidebar_divider.setFixedHeight(1)
+        self.sidebar_divider.setStyleSheet("background-color: rgba(148, 163, 184, 35);")
+        layout.addWidget(self.sidebar_divider)
+
+        # ── 3. NOTES SECTION ──
+        notes_header = QHBoxLayout()
+        notes_header.setSpacing(6)
+        notes_header.setContentsMargins(2, 4, 2, 2)
+        
+        self.notes_header_label = QLabel("Notes")
+        self.notes_header_label.setFont(QFont("Segoe UI", 10, QFont.Bold))
+        notes_header.addWidget(self.notes_header_label)
+        notes_header.addStretch()
+        layout.addLayout(notes_header)
+
+        self._add_note_btn = AddNoteButton()
+        self._add_note_btn.clicked.connect(self.note_add_clicked.emit)
+
+        self.notes_scroll = QScrollArea()
+        self.notes_scroll.setWidgetResizable(True)
+        self.notes_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.notes_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.notes_scroll.setMaximumHeight(140)
+        self.notes_scroll.setStyleSheet("""
+            QScrollArea {
+                background: transparent;
+                border: none;
+            }
+            QScrollArea > QWidget > QWidget {
+                background: transparent;
+            }
+            QScrollBar:vertical {
+                background: transparent;
+                width: 5px;
+            }
+            QScrollBar::handle:vertical {
+                background: rgba(148, 163, 184, 60);
+                border-radius: 2px;
+                min-height: 15px;
+            }
+            QScrollBar::handle:vertical:hover {
+                background: #38BDF8;
+            }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+                height: 0;
+            }
+        """)
+
+        self.notes_container = QWidget()
+        self.notes_container.setStyleSheet("background: transparent;")
+        self.notes_layout = QGridLayout(self.notes_container)
+        self.notes_layout.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+        self.notes_layout.setSpacing(8)
+        self.notes_layout.setContentsMargins(2, 4, 2, 4)
+        self.notes_scroll.setWidget(self.notes_container)
+        layout.addWidget(self.notes_scroll)
+
+        layout.addSpacing(4)
+
         # Settings button at bottom
         self.settings_btn = QPushButton("⚙️ Settings")
         self.settings_btn.setFont(QFont("Segoe UI", 11, QFont.Medium))
@@ -2436,6 +3101,9 @@ class Sidebar(QFrame):
 
     def set_pages(self, pages, active_page_id=None):
         """Populate the page list from page metadata list + add New Page button"""
+        if hasattr(self, 'pages_header_label'):
+            self.pages_header_label.setText("Page" if len(pages) == 1 else "Pages")
+
         # Clear existing buttons
         for btn in self._page_buttons.values():
             btn.cleanup()
@@ -2502,6 +3170,49 @@ class Sidebar(QFrame):
         """Update mute visual for a specific page"""
         if page_id in self._page_buttons:
             self._page_buttons[page_id].set_muted(muted)
+
+    def set_notes(self, notes):
+        """Populate notes icon grid and update header singular/plural label"""
+        if hasattr(self, 'notes_header_label'):
+            self.notes_header_label.setText("Note" if len(notes) == 1 else "Notes")
+
+        # Clear existing note buttons
+        for btn in self._note_buttons.values():
+            btn.cleanup()
+            btn.deleteLater()
+        self._note_buttons.clear()
+
+        while self.notes_layout.count():
+            item = self.notes_layout.takeAt(0)
+            w = item.widget()
+            if w and w != self._add_note_btn:
+                w.deleteLater()
+
+        self.notes_scroll.show()
+        cols = 4
+        for idx, note in enumerate(notes):
+            nid = str(note.get('id', ''))
+            btn = NoteIconButton(note_data=note, parent=self.notes_container)
+            btn.apply_theme(self.current_theme)
+            btn.edit_requested.connect(self.note_edit_requested.emit)
+            btn.delete_requested.connect(self.note_delete_requested.emit)
+
+            row = idx // cols
+            col = idx % cols
+            self.notes_layout.addWidget(btn, row, col, Qt.AlignLeft | Qt.AlignTop)
+            self._note_buttons[nid] = btn
+
+        # Position the '+ Add Note' empty square with dashed edges in the next slot
+        add_idx = len(notes)
+        add_row = add_idx // cols
+        add_col = add_idx % cols
+        self._add_note_btn.apply_theme(self.current_theme)
+        self.notes_layout.addWidget(self._add_note_btn, add_row, add_col, Qt.AlignLeft | Qt.AlignTop)
+
+        total_items = len(notes) + 1
+        rows = (total_items + cols - 1) // cols
+        calculated_height = min(150, max(46, rows * 44 + 8))
+        self.notes_scroll.setFixedHeight(calculated_height)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -2604,6 +3315,23 @@ class Sidebar(QFrame):
         for btn in self._page_buttons.values():
             btn.apply_theme(theme)
         self._apply_add_page_theme()
+
+        # Update headers and divider
+        hdr_color = spec['text_muted']
+        if hasattr(self, 'pages_header_label'):
+            self.pages_header_label.setStyleSheet(f"color: {hdr_color}; background: transparent;")
+        if hasattr(self, 'notes_header_label'):
+            self.notes_header_label.setStyleSheet(f"color: {hdr_color}; background: transparent;")
+
+        div_color = spec['card_border'] if not is_light else spec['input_border']
+        if hasattr(self, 'sidebar_divider'):
+            self.sidebar_divider.setStyleSheet(f"background-color: {div_color};")
+
+        # Update all note buttons and add note button
+        for n_btn in self._note_buttons.values():
+            n_btn.apply_theme(theme)
+        if hasattr(self, '_add_note_btn') and self._add_note_btn is not None:
+            self._add_note_btn.apply_theme(theme)
 
     def show_copy_feedback(self, page_id=None):
         """Show temporary 'Copied!' message positioned under the specific page button"""
@@ -2754,15 +3482,36 @@ class _ThemeComboItemDelegate(QStyledItemDelegate):
                 painter.drawRoundedRect(pill_rect, 6.0, 6.0)
             text_col = QColor(spec["text_main"])
 
-        # 3. Theme signature color swatch dot
+        # 3. Theme signature color swatch dot (dual-tone split: main body tone + accent)
         swatch_rect = QRectF(
             option.rect.left() + 13.0,
-            option.rect.center().y() - 5.0,
-            10.0,
-            10.0,
+            option.rect.center().y() - 5.5,
+            11.0,
+            11.0,
         )
-        painter.setBrush(QColor(item_spec["accent"]))
-        painter.setPen(QPen(QColor(item_spec["dialog_bg"]), 1.2))
+        main_color = QColor(item_spec.get("swatch_primary", item_spec.get("swatch_color", item_spec.get("dialog_bg", "#1E293B"))))
+        accent_color = QColor(item_spec.get("swatch_accent", item_spec.get("accent", "#38BDF8")))
+        item_is_light = item_spec.get("is_light", False)
+
+        # Draw two-tone split circle (left half: dominant body tone, right half: accent)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(main_color)
+        painter.drawPie(swatch_rect, 90 * 16, 180 * 16)
+        painter.setBrush(accent_color)
+        painter.drawPie(swatch_rect, 270 * 16, 180 * 16)
+
+        if item_is_light:
+            # Light theme: Crisp pure white outline
+            if is_light:
+                painter.setPen(QPen(QColor(148, 163, 184, 160), 2.2))
+                painter.setBrush(Qt.NoBrush)
+                painter.drawEllipse(swatch_rect)
+            painter.setPen(QPen(QColor("#FFFFFF"), 1.6))
+        else:
+            # Dark theme: Crisp dark/black outline
+            painter.setPen(QPen(QColor("#080808"), 1.5))
+
+        painter.setBrush(Qt.NoBrush)
         painter.drawEllipse(swatch_rect)
 
         # 4. Theme label text
@@ -2788,6 +3537,7 @@ class _ThemeComboBox(QComboBox):
         super().__init__(panel)
         self._panel = panel
         self.setItemDelegate(_ThemeComboItemDelegate(panel))
+        self.setMaxVisibleItems(14)
         self.view().setMouseTracking(True)
 
     def paintEvent(self, event):
@@ -3518,6 +4268,77 @@ class SettingsPanel(QFrame):
 
 
 
+class EmojiItemDelegate(QStyledItemDelegate):
+    """Custom item delegate to render full-scale emojis without truncation or ellipsis."""
+    def __init__(self, font_size=18, parent=None):
+        super().__init__(parent)
+        self.font = QFont("Segoe UI Emoji", font_size)
+        self.font.setFamilies(["Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji", "Apple Color Emoji", "Segoe UI", "sans-serif"])
+
+    def paint(self, painter, option, index):
+        opt = option.__class__(option)
+        self.initStyleOption(opt, index)
+        text = opt.text
+        opt.text = ''  # Prevent Qt QListView from eliding text into '...'
+        style = opt.widget.style() if opt.widget else QApplication.style()
+        style.drawControl(QStyle.CE_ItemViewItem, opt, painter, opt.widget)
+        if text:
+            painter.save()
+            painter.setFont(self.font)
+            painter.setPen(opt.palette.text().color())
+            painter.drawText(opt.rect, Qt.AlignCenter, text)
+            painter.restore()
+
+
+class SmoothEmojiList(QListWidget):
+    """
+    Hardware-accelerated, virtualized icon grid for smooth 60 FPS emoji browsing.
+    Eliminates thousands of individual child QPushButtons for zero-lag rendering.
+    Forwards wheel events to parent scroll area for continuous seamless scrolling.
+    """
+    def __init__(self, parent_scroll=None, item_size=36, font_size=16):
+        super().__init__()
+        self.parent_scroll = parent_scroll
+        self.item_size = item_size
+        self.setViewMode(QListView.IconMode)
+        self.setResizeMode(QListView.Adjust)
+        self.setUniformItemSizes(True)
+        self.setMovement(QListView.Static)
+        self.setTextElideMode(Qt.ElideNone)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.setSpacing(2)
+        self.setSelectionMode(QAbstractItemView.NoSelection)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setItemDelegate(EmojiItemDelegate(font_size, self))
+        font = QFont("Segoe UI Emoji", font_size)
+        font.setFamilies(["Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji", "Apple Color Emoji", "Segoe UI", "sans-serif"])
+        self.setFont(font)
+        self.setStyleSheet("""
+            QListWidget { background: transparent; border: none; outline: none; }
+            QListWidget::item { border-radius: 6px; background: transparent; }
+            QListWidget::item:hover { background-color: rgba(255, 255, 255, 0.15); }
+        """)
+
+    def wheelEvent(self, event):
+        if self.parent_scroll:
+            sb = self.parent_scroll.verticalScrollBar()
+            sb.setValue(sb.value() - event.angleDelta().y())
+            event.accept()
+        else:
+            event.ignore()
+
+    def set_emojis(self, emoji_list, cols=8):
+        self.clear()
+        for ch in emoji_list:
+            it = QListWidgetItem(ch)
+            it.setSizeHint(QSize(self.item_size, self.item_size))
+            it.setTextAlignment(Qt.AlignCenter)
+            self.addItem(it)
+        rows = (len(emoji_list) + cols - 1) // max(1, cols)
+        self.setFixedHeight(max(1, rows) * (self.item_size + 4) + 6)
+
+
 class AddTaskDialog(QDialog):
     """Dialog for adding/editing a task with full icon picker"""
     
@@ -3953,6 +4774,10 @@ class AddTaskDialog(QDialog):
             """)
         if hasattr(self, 'icon_picker_title'):
             self.icon_picker_title.setStyleSheet(f"color: {fg}; background: transparent;")
+        if hasattr(self, '_search_results_lbl'):
+            self._search_results_lbl.setStyleSheet(f"color: {fg}; background: transparent; font-weight: bold;")
+        if hasattr(self, '_no_results_lbl'):
+            self._no_results_lbl.setStyleSheet(f"color: {muted}; background: transparent; padding: 12px;")
         if hasattr(self, 'icon_search_input'):
             self.icon_search_input.setStyleSheet(f"""
                 QLineEdit {{
@@ -3976,15 +4801,26 @@ class AddTaskDialog(QDialog):
                     color: {muted};
                     background: transparent;
                 }}
-                #IconScrollContent QPushButton {{
-                    background-color: transparent;
-                    border: none;
-                    border-radius: 8px;
-                }}
-                #IconScrollContent QPushButton:hover {{
-                    background-color: rgba({ar}, {ag}, {ab}, 45);
-                }}
             """)
+        if hasattr(self, '_icon_list_widgets'):
+            hover_bg = f"rgba({ar}, {ag}, {ab}, {45 if is_light else 35})"
+            list_qss = f"""
+                QListWidget {{
+                    background: transparent;
+                    border: none;
+                    outline: none;
+                }}
+                QListWidget::item {{
+                    border-radius: 6px;
+                    background: transparent;
+                    color: {fg};
+                }}
+                QListWidget::item:hover {{
+                    background-color: {hover_bg};
+                }}
+            """
+            for lw in self._icon_list_widgets:
+                lw.setStyleSheet(list_qss)
 
 
     def apply_theme(self, theme):
@@ -4188,7 +5024,8 @@ class AddTaskDialog(QDialog):
         layout.addLayout(header)
         
         self.icon_search_input = QLineEdit()
-        self.icon_search_input.setPlaceholderText("Search category...")
+        self.icon_search_input.setPlaceholderText("Search Emojis")
+        self.icon_search_input.setClearButtonEnabled(True)
         layout.addWidget(self.icon_search_input)
         
         scroll = QScrollArea()
@@ -4207,36 +5044,53 @@ class AddTaskDialog(QDialog):
         scroll_content.setObjectName("IconScrollContent")
         self._icon_scroll_content = scroll_content
         scroll_layout = QVBoxLayout(scroll_content)
+        scroll_layout.setContentsMargins(0, 0, 0, 0)
+        scroll_layout.setSpacing(6)
+        
+        self._icon_list_widgets = []
         self._icon_category_sections = []
         self._icon_cat_labels = []
-        self._icon_btns = []
+
+        # Direct search results list (NO 'Search Results (X)' text header)
+        self._search_results_sec = QWidget()
+        sr_layout = QVBoxLayout(self._search_results_sec)
+        sr_layout.setContentsMargins(0, 0, 0, 0)
+        sr_layout.setSpacing(0)
         
-        cols = 8
+        cols = 9
+        self._search_results_list = SmoothEmojiList(parent_scroll=scroll, item_size=40, font_size=18)
+        self._search_results_list.itemClicked.connect(lambda item: self._select_icon(item.text()))
+        sr_layout.addWidget(self._search_results_list)
+        self._icon_list_widgets.append(self._search_results_list)
+        
+        self._no_results_lbl = QLabel("No matching emojis found")
+        self._no_results_lbl.setFont(QFont("Segoe UI", 11))
+        self._no_results_lbl.setAlignment(Qt.AlignCenter)
+        sr_layout.addWidget(self._no_results_lbl)
+        self._no_results_lbl.hide()
+        
+        scroll_layout.addWidget(self._search_results_sec)
+        self._search_results_sec.hide()
+
         for category, icons in self.icon_categories.items():
-            section_widget = QWidget()
-            section_layout = QVBoxLayout(section_widget)
-            section_layout.setContentsMargins(0, 0, 0, 6)
-            section_layout.setSpacing(6)
+            sec_widget = QWidget()
+            sec_layout = QVBoxLayout(sec_widget)
+            sec_layout.setContentsMargins(0, 0, 0, 4)
+            sec_layout.setSpacing(4)
 
             cat_label = QLabel(category)
             cat_label.setFont(QFont("Segoe UI", 12, QFont.Bold))
-            section_layout.addWidget(cat_label)
+            sec_layout.addWidget(cat_label)
             self._icon_cat_labels.append(cat_label)
             
-            grid = QGridLayout()
-            grid.setSpacing(5)
-            for i, icon in enumerate(icons):
-                btn = QPushButton(icon)
-                btn.setFont(QFont("Segoe UI Emoji", 18))
-                btn.setFixedSize(40, 40)
-                btn.setCursor(Qt.PointingHandCursor)
-                btn.clicked.connect(lambda checked, ic=icon: self._select_icon(ic))
-                grid.addWidget(btn, i // cols, i % cols)
-                self._icon_btns.append(btn)
-                
-            section_layout.addLayout(grid)
-            scroll_layout.addWidget(section_widget)
-            self._icon_category_sections.append((category.lower(), [str(ic) for ic in icons], section_widget))
+            cat_list = SmoothEmojiList(parent_scroll=scroll, item_size=40, font_size=18)
+            cat_list.set_emojis(icons, cols=cols)
+            cat_list.itemClicked.connect(lambda item: self._select_icon(item.text()))
+            sec_layout.addWidget(cat_list)
+            self._icon_list_widgets.append(cat_list)
+            
+            scroll_layout.addWidget(sec_widget)
+            self._icon_category_sections.append((category.lower(), sec_widget))
             
         scroll_layout.addStretch()
         scroll.setWidget(scroll_content)
@@ -4244,15 +5098,30 @@ class AddTaskDialog(QDialog):
 
         self._icon_search_timer = QTimer(self)
         self._icon_search_timer.setSingleShot(True)
-        self._icon_search_timer.setInterval(120)
+        self._icon_search_timer.setInterval(80)
 
         def _apply_icon_filter():
-            query = self.icon_search_input.text().strip().lower()
-            for cat_lower, icon_list, sec_widget in self._icon_category_sections:
-                if not query or query in cat_lower or any(query in ic for ic in icon_list):
+            query = self.icon_search_input.text().strip()
+            if not query:
+                self._search_results_sec.hide()
+                for _, sec_widget in self._icon_category_sections:
                     sec_widget.show()
-                else:
-                    sec_widget.hide()
+                return
+
+            for _, sec_widget in self._icon_category_sections:
+                sec_widget.hide()
+
+            results = GLOBAL_EMOJI_ENGINE.search(query, limit=56)
+            if results:
+                self._no_results_lbl.hide()
+                self._search_results_list.set_emojis(results, cols=cols)
+                self._search_results_list.show()
+            else:
+                self._search_results_list.clear()
+                self._search_results_list.hide()
+                self._no_results_lbl.show()
+
+            self._search_results_sec.show()
 
         self._icon_search_timer.timeout.connect(_apply_icon_filter)
         self.icon_search_input.textChanged.connect(lambda _text: self._icon_search_timer.start())
@@ -4386,3 +5255,561 @@ class AddTaskDialog(QDialog):
             'end_time': end_time,
             'repeat_days': repeat_days
         }
+
+
+class AddNoteDialog(QDialog):
+    """Dialog for creating and editing sidebar notes with custom icons, shape selection, and descriptions."""
+
+    def __init__(self, parent=None, note_data=None, icon_categories=None, theme=None):
+        super().__init__(parent)
+        self.note_data = note_data
+        self.icon_categories = icon_categories or {}
+        self.note_id = str(note_data.get('id', '')) if note_data else None
+        self.selected_shape = str(note_data.get('shape', 'circle')) if note_data else 'circle'
+        self.selected_icon = str(note_data.get('icon', '📝')) if note_data else '📝'
+
+        if theme is None and parent is not None:
+            theme = getattr(parent, 'current_theme', 'dark')
+        self.current_theme = theme or 'dark'
+
+        self.setWindowTitle("Edit Note" if note_data else "Add Note")
+        self.setFixedSize(380, 315)
+        self.setAttribute(Qt.WA_StyledBackground, True)
+        self.setAutoFillBackground(True)
+
+        self._setup_ui()
+        self.apply_theme(self.current_theme)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        apply_window_theme_frame(self, getattr(self, 'current_theme', 'dark'))
+
+    def _setup_ui(self):
+        self.main_layout = QVBoxLayout(self)
+        self.main_layout.setSpacing(8)
+        self.main_layout.setContentsMargins(16, 14, 16, 14)
+
+        self.form_frame = QWidget()
+        self.icons_frame = QWidget()
+        self._icon_picker_initialized = False
+
+        self._setup_form()
+
+        self.main_layout.addWidget(self.form_frame)
+        self.main_layout.addWidget(self.icons_frame)
+        self.icons_frame.hide()
+
+    def _setup_form(self):
+        layout = QVBoxLayout(self.form_frame)
+        layout.setSpacing(8)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        # 1. Icon section
+        self.icon_hdr = QLabel("Icon:")
+        self.icon_hdr.setFont(QFont("Segoe UI", 9, QFont.Bold))
+        layout.addWidget(self.icon_hdr)
+
+        icon_row = QHBoxLayout()
+        icon_row.setSpacing(10)
+
+        self.icon_preview = QLabel()
+        self.icon_preview.setFixedSize(46, 46)
+        self.icon_preview.setAlignment(Qt.AlignCenter)
+        self.icon_preview.setCursor(Qt.PointingHandCursor)
+        self.icon_preview.setToolTip("Click to toggle shape (Circle / Square)")
+        self.icon_preview.mousePressEvent = lambda e: self._toggle_shape() if e.button() == Qt.LeftButton else None
+        self._update_icon_preview()
+        icon_row.addWidget(self.icon_preview)
+
+        self.select_icon_btn = QPushButton("Select Icon")
+        self.select_icon_btn.setCursor(Qt.PointingHandCursor)
+        self.select_icon_btn.clicked.connect(self._show_icon_picker)
+        icon_row.addWidget(self.select_icon_btn)
+
+        self.or_label = QLabel("or")
+        self.or_label.setStyleSheet("font-size: 11px;")
+        icon_row.addWidget(self.or_label)
+
+        self.custom_img_btn = QPushButton("Custom Image")
+        self.custom_img_btn.setCursor(Qt.PointingHandCursor)
+        self.custom_img_btn.clicked.connect(self._on_custom_image)
+        icon_row.addWidget(self.custom_img_btn)
+
+        icon_row.addStretch()
+        layout.addLayout(icon_row)
+
+        # 2. Note Title
+        self.title_hdr = QLabel("Title:")
+        self.title_hdr.setFont(QFont("Segoe UI", 9, QFont.Bold))
+        layout.addWidget(self.title_hdr)
+
+        self.title_input = QLineEdit()
+        self.title_input.setPlaceholderText("Drink Water")
+        self.title_input.setMaxLength(60)
+        if self.note_data:
+            self.title_input.setText(self.note_data.get('title', ''))
+        self.title_input.textChanged.connect(self._validate_form)
+        layout.addWidget(self.title_input)
+
+        # 3. Note Description
+        desc_hdr_row = QHBoxLayout()
+        self.desc_hdr = QLabel("Description:")
+        self.desc_hdr.setFont(QFont("Segoe UI", 9, QFont.Bold))
+        desc_hdr_row.addWidget(self.desc_hdr)
+        desc_hdr_row.addStretch()
+
+        self.char_counter = QLabel("0/250")
+        self.char_counter.setFont(QFont("Segoe UI", 8))
+        desc_hdr_row.addWidget(self.char_counter)
+        layout.addLayout(desc_hdr_row)
+
+        self.desc_input = QTextEdit()
+        self.desc_input.setPlaceholderText("Stay hydrated to keep your body and mind energized.")
+        self.desc_input.setFixedHeight(62)
+        if self.note_data:
+            self.desc_input.setPlainText(self.note_data.get('description', ''))
+        self.desc_input.textChanged.connect(self._on_desc_changed)
+        layout.addWidget(self.desc_input)
+        self._on_desc_changed()
+
+        layout.addStretch()
+
+        # 4. Buttons
+        btn_layout = QHBoxLayout()
+        btn_layout.setSpacing(8)
+
+        if self.note_data:
+            self.delete_btn = QPushButton("Delete")
+            self.delete_btn.setCursor(Qt.PointingHandCursor)
+            self.delete_btn.clicked.connect(self._on_delete)
+            btn_layout.addWidget(self.delete_btn)
+
+        btn_layout.addStretch()
+
+        self.cancel_btn = QPushButton("Cancel")
+        self.cancel_btn.setCursor(Qt.PointingHandCursor)
+        self.cancel_btn.clicked.connect(self.reject)
+        btn_layout.addWidget(self.cancel_btn)
+
+        self.save_btn = QPushButton("Save Changes" if self.note_data else "Create")
+        self.save_btn.setCursor(Qt.PointingHandCursor)
+        self.save_btn.clicked.connect(self.accept)
+        btn_layout.addWidget(self.save_btn)
+
+        layout.addLayout(btn_layout)
+        self._validate_form()
+
+    def _set_shape(self, shape):
+        self.selected_shape = 'square' if shape == 'square' else 'circle'
+        self._update_icon_preview()
+
+    def _toggle_shape(self):
+        self._set_shape('square' if self.selected_shape == 'circle' else 'circle')
+
+    def _on_desc_changed(self):
+        text = self.desc_input.toPlainText()
+        if len(text) > 250:
+            cursor = self.desc_input.textCursor()
+            self.desc_input.setPlainText(text[:250])
+            self.desc_input.setTextCursor(cursor)
+            text = text[:250]
+        self.char_counter.setText(f"{len(text)}/250")
+
+    def _update_icon_preview(self):
+        if not hasattr(self, 'icon_preview'):
+            return
+        icon_val = self.selected_icon or "📝"
+        spec = get_theme_spec(self.current_theme)
+        input_bg = spec["input_bg"]
+        ar, ag, ab = spec["accent_rgb"]
+
+        radius = "23px" if self.selected_shape == 'circle' else "8px"
+        self.icon_preview.setStyleSheet(f"""
+            QLabel {{
+                background-color: {input_bg};
+                border: 2px solid rgba({ar}, {ag}, {ab}, 190);
+                border-radius: {radius};
+            }}
+        """)
+
+        is_path = any(s in str(icon_val).lower() for s in ['\\', '/', '.png', '.jpg', '.jpeg', '.webp'])
+        if is_path:
+            resolved_path = icon_val
+            if not os.path.isabs(resolved_path) and 'cache' in resolved_path:
+                appdata = os.getenv('APPDATA', os.path.expanduser('~'))
+                resolved_path = os.path.normpath(os.path.join(appdata, 'DailyTasks', resolved_path))
+            raw = QPixmap(resolved_path)
+            if not raw.isNull():
+                scaled = raw.scaled(30, 30, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                self.icon_preview.setText("")
+                self.icon_preview.setPixmap(scaled)
+                return
+            else:
+                icon_val = "❓"
+
+        self.icon_preview.setPixmap(QPixmap())
+        self.icon_preview.setFont(QFont("Segoe UI Emoji", 20))
+        self.icon_preview.setText(icon_val)
+
+    def _on_custom_image(self):
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select Custom Image",
+            "",
+            "Images (*.png *.jpg *.jpeg *.webp)"
+        )
+        if file_path:
+            self.selected_icon = file_path
+            self._update_icon_preview()
+            self._validate_form()
+
+    def _setup_icon_picker(self):
+        layout = QVBoxLayout(self.icons_frame)
+        layout.setSpacing(8)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        header = QHBoxLayout()
+        self.icon_back_btn = QPushButton("← Back")
+        self.icon_back_btn.setCursor(Qt.PointingHandCursor)
+        self.icon_back_btn.clicked.connect(self._show_form)
+        header.addWidget(self.icon_back_btn)
+
+        self.icon_picker_title = QLabel("Select Icon")
+        self.icon_picker_title.setFont(QFont("Segoe UI", 12, QFont.Bold))
+        header.addWidget(self.icon_picker_title)
+        header.addStretch()
+        layout.addLayout(header)
+
+        self.icon_search_input = QLineEdit()
+        self.icon_search_input.setPlaceholderText("Search Emojis")
+        self.icon_search_input.setClearButtonEnabled(True)
+        layout.addWidget(self.icon_search_input)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setStyleSheet("""
+            QScrollArea {
+                border: none;
+                background: transparent;
+            }
+            QScrollArea > QWidget > QWidget {
+                background: transparent;
+            }
+        """)
+
+        scroll_content = QWidget()
+        scroll_content.setObjectName("NoteIconScrollContent")
+        self._icon_scroll_content = scroll_content
+        scroll_layout = QVBoxLayout(scroll_content)
+        scroll_layout.setContentsMargins(0, 0, 0, 0)
+        scroll_layout.setSpacing(6)
+
+        self._icon_list_widgets = []
+        self._icon_category_sections = []
+        self._icon_cat_labels = []
+
+        # Direct search results list (NO 'Search Results (X)' text header)
+        self._search_results_sec = QWidget()
+        sr_layout = QVBoxLayout(self._search_results_sec)
+        sr_layout.setContentsMargins(0, 0, 0, 0)
+        sr_layout.setSpacing(0)
+
+        cols = 8
+        self._search_results_list = SmoothEmojiList(parent_scroll=scroll, item_size=34, font_size=16)
+        self._search_results_list.itemClicked.connect(lambda item: self._select_icon(item.text()))
+        sr_layout.addWidget(self._search_results_list)
+        self._icon_list_widgets.append(self._search_results_list)
+
+        self._no_results_lbl = QLabel("No matching emojis found")
+        self._no_results_lbl.setFont(QFont("Segoe UI", 10))
+        self._no_results_lbl.setAlignment(Qt.AlignCenter)
+        sr_layout.addWidget(self._no_results_lbl)
+        self._no_results_lbl.hide()
+
+        scroll_layout.addWidget(self._search_results_sec)
+        self._search_results_sec.hide()
+
+        for category, icons in self.icon_categories.items():
+            sec_widget = QWidget()
+            sec_layout = QVBoxLayout(sec_widget)
+            sec_layout.setContentsMargins(0, 0, 0, 4)
+            sec_layout.setSpacing(4)
+
+            cat_label = QLabel(category)
+            cat_label.setFont(QFont("Segoe UI", 10, QFont.Bold))
+            sec_layout.addWidget(cat_label)
+            self._icon_cat_labels.append(cat_label)
+
+            cat_list = SmoothEmojiList(parent_scroll=scroll, item_size=34, font_size=16)
+            cat_list.set_emojis(icons, cols=cols)
+            cat_list.itemClicked.connect(lambda item: self._select_icon(item.text()))
+            sec_layout.addWidget(cat_list)
+            self._icon_list_widgets.append(cat_list)
+
+            scroll_layout.addWidget(sec_widget)
+            self._icon_category_sections.append((category.lower(), sec_widget))
+
+        scroll_layout.addStretch()
+        scroll.setWidget(scroll_content)
+        layout.addWidget(scroll)
+
+        self._icon_search_timer = QTimer(self)
+        self._icon_search_timer.setSingleShot(True)
+        self._icon_search_timer.setInterval(80)
+
+        def _apply_icon_filter():
+            query = self.icon_search_input.text().strip()
+            if not query:
+                self._search_results_sec.hide()
+                for _, sec_widget in self._icon_category_sections:
+                    sec_widget.show()
+                return
+
+            for _, sec_widget in self._icon_category_sections:
+                sec_widget.hide()
+
+            results = GLOBAL_EMOJI_ENGINE.search(query, limit=56)
+            if results:
+                self._no_results_lbl.hide()
+                self._search_results_list.set_emojis(results, cols=cols)
+                self._search_results_list.show()
+            else:
+                self._search_results_list.clear()
+                self._search_results_list.hide()
+                self._no_results_lbl.show()
+
+            self._search_results_sec.show()
+
+        self._icon_search_timer.timeout.connect(_apply_icon_filter)
+        self.icon_search_input.textChanged.connect(lambda _text: self._icon_search_timer.start())
+
+    def _show_icon_picker(self):
+        if not self._icon_picker_initialized:
+            self._setup_icon_picker()
+            self._icon_picker_initialized = True
+            self._apply_icon_picker_theme()
+        self.form_frame.hide()
+        self.icons_frame.show()
+
+    def _show_form(self):
+        self.icons_frame.hide()
+        self.form_frame.show()
+
+    def _select_icon(self, icon):
+        self.selected_icon = icon
+        self._update_icon_preview()
+        self._show_form()
+
+    def _on_delete(self):
+        self.done(2)
+
+    def accept(self):
+        if not self.title_input.text().strip():
+            ModernDialogs.show_message(self, "Required", "Please enter a note title.", theme=self.current_theme)
+            return
+        super().accept()
+
+    def _validate_form(self):
+        is_valid = bool(self.title_input.text().strip())
+        if hasattr(self, 'save_btn'):
+            self.save_btn.setEnabled(is_valid)
+
+    def get_note_data(self):
+        final_icon_path = self.selected_icon
+        if final_icon_path:
+            is_path = any(s in final_icon_path.lower() for s in ['\\', '/', '.png', '.jpg', '.jpeg', '.webp'])
+            if is_path and os.path.isabs(final_icon_path) and 'cache' not in final_icon_path:
+                appdata = os.getenv('APPDATA', os.path.expanduser('~'))
+                cache_dir = os.path.join(appdata, 'DailyTasks', 'cache')
+                os.makedirs(cache_dir, exist_ok=True)
+
+                ext = os.path.splitext(final_icon_path)[1]
+                unique_name = f"custom_{uuid.uuid4().hex}{ext}"
+                absolute_cache_path = os.path.join(cache_dir, unique_name)
+
+                try:
+                    shutil.copy2(final_icon_path, absolute_cache_path)
+                    final_icon_path = os.path.join('cache', unique_name)
+                except Exception as e:
+                    print(f"Failed to cache note image: {e}")
+                    final_icon_path = '📝'
+
+        return {
+            'id': self.note_id,
+            'title': self.title_input.text().strip(),
+            'description': self.desc_input.toPlainText().strip(),
+            'icon': final_icon_path or '📝',
+            'shape': self.selected_shape
+        }
+
+    def _apply_icon_picker_theme(self):
+        if not getattr(self, '_icon_picker_initialized', False):
+            return
+        spec = get_theme_spec(self.current_theme)
+        is_light = spec["is_light"]
+        ar, ag, ab = spec["accent_rgb"]
+        fg = spec["text_main"]
+        muted = spec["text_muted"]
+        input_bg = spec["input_bg"]
+        input_border = spec["input_border"]
+        focus_border = spec["accent"]
+
+        if hasattr(self, 'icon_back_btn'):
+            self.icon_back_btn.setStyleSheet(f"""
+                QPushButton {{
+                    background-color: rgba({ar}, {ag}, {ab}, {28 if is_light else 20});
+                    color: {focus_border};
+                    border: 1px solid {focus_border};
+                    border-radius: 8px;
+                    padding: 4px 10px;
+                    font-weight: bold;
+                }}
+                QPushButton:hover {{
+                    background-color: rgba({ar}, {ag}, {ab}, {50 if is_light else 40});
+                }}
+            """)
+        if hasattr(self, 'icon_picker_title'):
+            self.icon_picker_title.setStyleSheet(f"color: {fg}; background: transparent;")
+        if hasattr(self, '_no_results_lbl'):
+            self._no_results_lbl.setStyleSheet(f"color: {muted}; background: transparent; padding: 12px;")
+        if hasattr(self, 'icon_search_input'):
+            self.icon_search_input.setStyleSheet(f"""
+                QLineEdit {{
+                    background-color: {input_bg};
+                    color: {fg};
+                    border: 1px solid {input_border};
+                    border-radius: 8px;
+                    padding: 6px;
+                    font-family: 'Segoe UI';
+                }}
+                QLineEdit:focus {{
+                    border: 1px solid {focus_border};
+                }}
+            """)
+        if hasattr(self, '_icon_scroll_content') and self._icon_scroll_content is not None:
+            self._icon_scroll_content.setStyleSheet(f"""
+                #NoteIconScrollContent {{
+                    background: transparent;
+                }}
+                #NoteIconScrollContent QLabel {{
+                    color: {muted};
+                    background: transparent;
+                }}
+            """)
+        if hasattr(self, '_icon_list_widgets'):
+            hover_bg = f"rgba({ar}, {ag}, {ab}, {45 if is_light else 35})"
+            list_qss = f"""
+                QListWidget {{
+                    background: transparent;
+                    border: none;
+                    outline: none;
+                }}
+                QListWidget::item {{
+                    border-radius: 6px;
+                    background: transparent;
+                    color: {fg};
+                }}
+                QListWidget::item:hover {{
+                    background-color: {hover_bg};
+                }}
+            """
+            for lw in self._icon_list_widgets:
+                lw.setStyleSheet(list_qss)
+
+    def apply_theme(self, theme):
+        self.current_theme = theme
+        spec = get_theme_spec(theme)
+        is_light = spec["is_light"]
+
+        bg = spec["dialog_bg"]
+        fg = spec["text_main"]
+        muted = spec["text_muted"]
+        input_bg = spec["input_bg"]
+        input_border = spec["input_border"]
+        focus_border = spec["accent"]
+        ar, ag, ab = spec["accent_rgb"]
+
+        self.setAttribute(Qt.WA_StyledBackground, True)
+        self.setAutoFillBackground(True)
+        pal = self.palette()
+        pal.setColor(self.backgroundRole(), QColor(bg))
+        pal.setColor(self.foregroundRole(), QColor(fg))
+        self.setPalette(pal)
+
+        self.ensurePolished()
+        self.setStyleSheet(f"""
+            QDialog {{
+                background-color: {bg};
+                color: {fg};
+            }}
+            QLabel {{
+                color: {fg};
+                font-family: 'Segoe UI';
+                background: transparent;
+            }}
+            QLineEdit {{
+                background-color: {input_bg};
+                color: {fg};
+                border: 1px solid {input_border};
+                border-radius: 8px;
+                padding: 6px 8px;
+                font-family: 'Segoe UI';
+            }}
+            QLineEdit:focus {{
+                border: 1px solid {focus_border};
+            }}
+            QTextEdit {{
+                background-color: {input_bg};
+                color: {fg};
+                border: 1px solid {input_border};
+                border-radius: 8px;
+                padding: 6px 8px;
+                font-family: 'Segoe UI';
+            }}
+            QTextEdit:focus {{
+                border: 1px solid {focus_border};
+            }}
+        """)
+
+        if hasattr(self, 'char_counter'):
+            self.char_counter.setStyleSheet(f"color: {muted}; background: transparent;")
+
+        self._update_icon_preview()
+
+        def style_btn(btn_name, bg_c, fg_c, hover_c, border_c):
+            if hasattr(self, btn_name):
+                getattr(self, btn_name).setStyleSheet(f"""
+                    QPushButton {{
+                        background-color: {bg_c};
+                        color: {fg_c};
+                        border: 1px solid {border_c};
+                        border-radius: 8px;
+                        padding: 6px 14px;
+                        font-weight: bold;
+                    }}
+                    QPushButton:hover {{
+                        background-color: {hover_c};
+                    }}
+                    QPushButton:disabled {{
+                        background-color: {'#E2E8F0' if is_light else input_bg};
+                        color: {muted};
+                        border: 1px solid {input_border};
+                    }}
+                """)
+
+        if is_light:
+            neutral_bg, neutral_fg, neutral_hover, neutral_border = "#E2E8F0", spec["text_main"], "#CBD5E1", input_border
+        else:
+            neutral_bg, neutral_fg, neutral_hover, neutral_border = input_bg, spec["text_main"], input_border, input_border
+
+        primary_bg, primary_fg, primary_hover, primary_border = spec["accent_primary"], "#FFFFFF", spec["accent_hover"], spec["accent"]
+        delete_bg, delete_fg, delete_hover, delete_border = "#E11D48", "#FFFFFF", "#F43F5E", "#FB7185"
+
+        style_btn('select_icon_btn', neutral_bg, neutral_fg, neutral_hover, neutral_border)
+        style_btn('custom_img_btn', neutral_bg, neutral_fg, neutral_hover, neutral_border)
+        style_btn('cancel_btn', neutral_bg, neutral_fg, neutral_hover, neutral_border)
+        style_btn('save_btn', primary_bg, primary_fg, primary_hover, primary_border)
+        style_btn('delete_btn', delete_bg, delete_fg, delete_hover, delete_border)
+
+        self._apply_icon_picker_theme()
+        apply_window_theme_frame(self, theme)

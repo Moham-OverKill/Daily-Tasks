@@ -19,6 +19,20 @@ DEFAULT_ICON = '📝'
 ALL_DAYS_MASK = 0x7F
 
 
+class DecodedRoutine(tuple):
+    """
+    Two-tuple (page_name, tasks) with optional .notes attribute.
+    Ensures full backward compatibility with any caller doing `page_name, tasks = decode_tasks(...)`.
+    """
+    def __new__(cls, page_name, tasks, notes=None):
+        return super().__new__(cls, (page_name, tasks))
+
+    def __init__(self, page_name, tasks, notes=None):
+        self.page_name = page_name
+        self.tasks = tasks
+        self.notes = notes or []
+
+
 def _filter_shareable_tasks(tasks):
     """Filter out disabled-flag or globally synced prayer tasks."""
     return [
@@ -29,7 +43,7 @@ def _filter_shareable_tasks(tasks):
     ]
 
 
-def _encode_v4_body(valid_tasks, page_name=None):
+def _encode_v4_body(valid_tasks, page_name=None, notes=None):
     """
     Build the compact V4 binary body (excluding the outer version byte):
       - Header Byte: (page_mode << 6) | count_code
@@ -159,10 +173,27 @@ def _encode_v4_body(valid_tasks, page_name=None):
             body.append(n_len)
         body.extend(name_bytes)
 
+    if notes:
+        valid_notes = [n for n in notes if isinstance(n, dict) and n.get('title')]
+        if valid_notes:
+            body.append(min(len(valid_notes), 255))
+            for note in valid_notes[:255]:
+                shape_val = 1 if note.get('shape') == 'square' else 0
+                body.append(shape_val)
+                icon_b = str(note.get('icon', '📝')).encode('utf-8')[:255]
+                body.append(len(icon_b))
+                body.extend(icon_b)
+                title_b = str(note.get('title', '')).encode('utf-8')[:255]
+                body.append(len(title_b))
+                body.extend(title_b)
+                desc_b = str(note.get('description', '')).encode('utf-8')[:65535]
+                body.extend(struct.pack('>H', len(desc_b)))
+                body.extend(desc_b)
+
     return bytes(body)
 
 
-def encode_tasks(tasks, page_name=None):
+def encode_tasks(tasks, page_name=None, notes=None):
     """
     Encodes task list into an ultra-compact Share ID string (V4/V5).
     Automatically picks whichever representation (raw compact V4 or
@@ -170,7 +201,7 @@ def encode_tasks(tasks, page_name=None):
     redundant Base64 '=' padding.
     """
     valid_tasks = _filter_shareable_tasks(tasks)
-    v4_body = _encode_v4_body(valid_tasks, page_name=page_name)
+    v4_body = _encode_v4_body(valid_tasks, page_name=page_name, notes=notes)
 
     # Try raw deflate (wbits=-15 omits the 2-byte zlib header & 4-byte checksum)
     compressor = zlib.compressobj(level=9, wbits=-15)
@@ -239,20 +270,24 @@ def _encode_tasks_v3(tasks, page_name=None):
     return base64.urlsafe_b64encode(buffer).decode('ascii')
 
 
-def decode_tasks(share_id):
+def decode_tasks(share_id, include_notes=False):
     """
     Decodes a Share ID string back into (page_name, task_list).
     Fully supports:
       - Legacy V1, V2, and V3 codes (padded or unpadded Base64)
       - Compact V4 (uncompressed) and V5 (raw Deflate compressed) codes
+    Returns a DecodedRoutine tuple (page_name, tasks) with .notes attribute,
+    or a 3-tuple (page_name, tasks, notes) if include_notes=True.
     """
     try:
         if not share_id or not isinstance(share_id, str):
-            return (None, [])
+            res = DecodedRoutine(None, [])
+            return (res.page_name, res.tasks, res.notes) if include_notes else res
 
         cleaned = share_id.strip()
         if not cleaned:
-            return (None, [])
+            res = DecodedRoutine(None, [])
+            return (res.page_name, res.tasks, res.notes) if include_notes else res
 
         # Restore stripped '=' padding for Base64 decoding
         padded = cleaned + ('=' * (-len(cleaned) % 4))
@@ -264,15 +299,21 @@ def decode_tasks(share_id):
         ver = data[0]
 
         if ver in (1, 2, 3):
-            return _decode_legacy_v1_v2_v3(data, ver)
+            legacy_res = _decode_legacy_v1_v2_v3(data, ver)
+            res = DecodedRoutine(legacy_res[0], legacy_res[1])
         elif ver in (4, 5):
-            return _decode_v4_v5(data, ver)
+            res = _decode_v4_v5(data, ver)
         else:
             raise ValueError(f"Unsupported version: {ver}")
 
+        if include_notes:
+            return (res.page_name, res.tasks, getattr(res, 'notes', []))
+        return res
+
     except Exception as e:
         print(f"Decode error: {e}")
-        return (None, [])
+        res = DecodedRoutine(None, [])
+        return (res.page_name, res.tasks, res.notes) if include_notes else res
 
 
 def _decode_v4_v5(data, ver):
@@ -393,7 +434,46 @@ def _decode_v4_v5(data, ver):
             'repeat_days': repeat_days
         })
 
-    return (page_name, tasks)
+    notes = []
+    if idx < len(body):
+        try:
+            note_count = body[idx]
+            idx += 1
+            for _ in range(note_count):
+                if idx >= len(body):
+                    break
+                shape_val = body[idx]
+                shape = 'square' if shape_val == 1 else 'circle'
+                idx += 1
+                if idx >= len(body):
+                    break
+                icon_len = body[idx]
+                idx += 1
+                icon = body[idx:idx + icon_len].decode('utf-8', errors='replace') if idx + icon_len <= len(body) else DEFAULT_ICON
+                idx += icon_len
+                if idx >= len(body):
+                    break
+                title_len = body[idx]
+                idx += 1
+                title = body[idx:idx + title_len].decode('utf-8', errors='replace') if idx + title_len <= len(body) else ''
+                idx += title_len
+                if idx + 2 > len(body):
+                    break
+                desc_len = struct.unpack('>H', body[idx:idx + 2])[0]
+                idx += 2
+                desc = body[idx:idx + desc_len].decode('utf-8', errors='replace') if idx + desc_len <= len(body) else ''
+                idx += desc_len
+                notes.append({
+                    'id': str(uuid.uuid4()),
+                    'title': title,
+                    'description': desc,
+                    'icon': icon,
+                    'shape': shape,
+                })
+        except Exception:
+            pass
+
+    return DecodedRoutine(page_name, tasks, notes)
 
 
 def _decode_legacy_v1_v2_v3(data, ver):
@@ -458,7 +538,7 @@ def _decode_legacy_v1_v2_v3(data, ver):
             'repeat_days': repeat_days
         })
 
-    return (page_name, tasks)
+    return DecodedRoutine(page_name, tasks, [])
 
 
 def _time_str_to_mins(t_str):

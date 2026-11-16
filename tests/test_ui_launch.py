@@ -447,7 +447,7 @@ class TestUIAppLaunch(unittest.TestCase):
         from src.qt_components import THEME_OPTIONS
 
         # 1. Verify semantic version parsing and comparison
-        self.assertEqual(APP_VERSION, "1.4.2")
+        self.assertEqual(APP_VERSION, "1.5.0")
         self.assertEqual(parse_version("v1.3.0"), (1, 3, 0))
         self.assertEqual(parse_version("1.2"), (1, 2, 0))
         self.assertEqual(parse_version("v2.0.1-beta"), (2, 0, 1))
@@ -496,6 +496,18 @@ class TestUIAppLaunch(unittest.TestCase):
         for theme_key, _ in THEME_OPTIONS:
             panel.apply_theme(theme_key)
             panel.grab()
+
+        # 4. Verify left-clicking outside SettingsPanel closes it as if hitting close button
+        from PySide6.QtCore import Qt, QPoint, QEvent
+        from PySide6.QtGui import QMouseEvent
+        self.window.show()
+        self.window._toggle_settings_panel()
+        self.assertFalse(panel.isHidden())
+        outside_pt = QPoint(self.window.width() - 50, 100)
+        outside_event = QMouseEvent(QEvent.MouseButtonPress, outside_pt, self.window.mapToGlobal(outside_pt), Qt.LeftButton, Qt.LeftButton, Qt.NoModifier)
+        consumed = self.window.eventFilter(self.window.centralWidget(), outside_event)
+        self.assertTrue(consumed)
+        self.assertTrue(panel.isHidden())
 
     def test_optional_start_end_time_toggles(self):
         """Verify optional Start/End time toggles (default OFF for new tasks), All-Day tasks, Start-Only tasks, and Share ID encoding."""
@@ -873,6 +885,219 @@ class TestUIAppLaunch(unittest.TestCase):
 
         # 5. Verify bounded LRU pixmap cache invariant
         self.assertLessEqual(len(TaskCard._PIXMAP_CACHE), TaskCard._PIXMAP_CACHE_MAX)
+
+    def test_sidebar_notes_feature(self):
+        """Comprehensive verification of the Notes feature: CRUD, Singular/Plural headers, Dialog, HoverCard, and Share ID bundling."""
+        from src.qt_components import NoteHoverCard, NoteIconButton, AddNoteDialog
+        from src import share_handler
+        from PySide6.QtCore import QPoint
+
+        self.window.show()
+        tm = self.window.task_manager
+        sidebar = self.window.sidebar
+
+        # 1. Singular/Plural Header Labels on Pages
+        pages = tm.get_pages()
+        self.assertGreaterEqual(len(pages), 1)
+        sidebar.set_pages(pages[:1])
+        self.assertEqual(sidebar.pages_header_label.text(), "Page")
+        sidebar.set_pages(pages[:1] + [{'id': 'p2', 'name': 'Second Page'}])
+        self.assertEqual(sidebar.pages_header_label.text(), "Pages")
+
+        orig_notes = [dict(n) for n in tm.notes]
+        try:
+            tm.notes = []
+            tm.save_tasks()
+
+            # 2. Singular/Plural Header Labels on Notes
+            sidebar.set_notes([])
+            self.assertEqual(sidebar.notes_header_label.text(), "Notes")
+            self.assertGreater(sidebar.notes_scroll.height(), 0)
+            self.assertIsNotNone(sidebar._add_note_btn)
+
+            n1 = tm.add_note(title="Read documentation", description="Understand the architecture", icon="📚", shape="circle")
+            self.assertEqual(len(tm.get_notes()), 1)
+            self.window._refresh_notes_list()
+            self.assertEqual(sidebar.notes_header_label.text(), "Note")
+            self.assertIn(n1['id'], sidebar._note_buttons)
+
+            n2 = tm.add_note(title="Daily Motivation", description="Keep pushing forward", icon="🔥", shape="square")
+            self.assertEqual(len(tm.get_notes()), 2)
+            self.window._refresh_notes_list()
+            self.assertEqual(sidebar.notes_header_label.text(), "Notes")
+            self.assertIn(n2['id'], sidebar._note_buttons)
+
+            # 3. NoteIconButton & Hover Card validation
+            btn1 = sidebar._note_buttons[n1['id']]
+            self.assertEqual(btn1.shape, "circle")
+            self.assertEqual(btn1.icon_val, "📚")
+            btn1._show_hover_card()
+            self.assertIsNotNone(btn1._hover_card)
+            self.assertEqual(btn1._hover_card.title_label.text(), "Read documentation")
+            self.assertEqual(btn1._hover_card.desc_label.text(), "Understand the architecture")
+            self.assertTrue(btn1._hover_card.pos().y() < btn1.mapToGlobal(QPoint(0, 0)).y())
+            btn1._hide_hover_card()
+
+            btn2 = sidebar._note_buttons[n2['id']]
+            self.assertEqual(btn2.shape, "square")
+            self.assertEqual(btn2.icon_val, "🔥")
+
+            # 4. Update & Delete CRUD
+            tm.update_note(n1['id'], title="Updated Title", description="New description", icon="💡", shape="square")
+            updated = tm.get_note_by_id(n1['id'])
+            self.assertEqual(updated['title'], "Updated Title")
+            self.assertEqual(updated['shape'], "square")
+            self.assertEqual(updated['icon'], "💡")
+
+            tm.delete_note(n2['id'])
+            self.assertEqual(len(tm.get_notes()), 1)
+            self.assertIsNone(tm.get_note_by_id(n2['id']))
+            self.window._refresh_notes_list()
+            self.assertEqual(sidebar.notes_header_label.text(), "Note")
+
+            tm.delete_note(n1['id'])
+            self.assertEqual(len(tm.get_notes()), 0)
+            self.assertIsNone(tm.get_note_by_id(n1['id']))
+            self.window._refresh_notes_list()
+            self.assertEqual(sidebar.notes_header_label.text(), "Notes")
+
+            # 5. AddNoteDialog validation & interaction
+            dialog = AddNoteDialog(self.window, note_data=None)
+            self.assertEqual(dialog.title_input.placeholderText(), "Drink Water")
+            self.assertEqual(dialog.desc_input.placeholderText(), "Stay hydrated to keep your body and mind energized.")
+            self.assertEqual(dialog.icon_hdr.text(), "Icon:")
+
+            # Empty title -> Save disabled
+            dialog.title_input.setText("")
+            self.assertFalse(dialog.save_btn.isEnabled())
+
+            # Valid title -> Save enabled
+            dialog.title_input.setText("Ship features")
+            self.assertTrue(dialog.save_btn.isEnabled())
+
+            # Shape switching via toggle and helper
+            dialog._toggle_shape()
+            self.assertEqual(dialog.selected_shape, "square")
+            dialog._toggle_shape()
+            self.assertEqual(dialog.selected_shape, "circle")
+            dialog._set_shape("square")
+            self.assertEqual(dialog.selected_shape, "square")
+            dialog._set_shape("circle")
+            self.assertEqual(dialog.selected_shape, "circle")
+
+            # Description length truncation at 250
+            dialog.desc_input.setPlainText("a" * 300)
+            self.assertEqual(len(dialog.desc_input.toPlainText()), 250)
+            self.assertEqual(dialog.char_counter.text(), "250/250")
+
+            # get_note_data()
+            data = dialog.get_note_data()
+            self.assertEqual(data['title'], "Ship features")
+            self.assertEqual(data['shape'], "circle")
+            self.assertEqual(data['icon'], "📝")
+            dialog.deleteLater()
+
+            # 6. Share ID bundling & decoding with notes
+            custom_tasks = [{'id': 'task_test_1', 'name': 'Morning Jog', 'start_time': '07:00', 'end_time': '08:00', 'status': 'pending'}]
+            notes_to_share = [
+                {'id': 'n_share_1', 'title': 'Stay Hydrated', 'description': 'Drink 2L water', 'icon': '💧', 'shape': 'circle'}
+            ]
+            share_code = share_handler.encode_tasks(custom_tasks, page_name="Workout", notes=notes_to_share)
+            decoded = share_handler.decode_tasks(share_code)
+            page_name_dec, tasks_dec = decoded
+            self.assertEqual(page_name_dec, "Workout")
+            self.assertEqual(len(tasks_dec), 1)
+            self.assertEqual(tasks_dec[0]['name'], "Morning Jog")
+            self.assertTrue(hasattr(decoded, 'notes'))
+            self.assertEqual(len(decoded.notes), 1)
+            self.assertEqual(decoded.notes[0]['title'], "Stay Hydrated")
+            self.assertEqual(decoded.notes[0]['icon'], "💧")
+
+            # 7. Theme adaptation across all presets
+            from src.qt_components import THEME_OPTIONS
+            for theme_key, _ in THEME_OPTIONS:
+                self.window.sidebar.apply_theme(theme_key)
+                dialog_theme = AddNoteDialog(self.window, theme=theme_key)
+                dialog_theme.apply_theme(theme_key)
+                dialog_theme.deleteLater()
+        finally:
+            tm.notes = orig_notes
+            tm.save_tasks()
+            self.window._refresh_notes_list()
+
+    def test_emoji_smart_search_and_icon_picker(self):
+        """Verify expanded Windows emoji support, smart typo tolerance, and dialog search UX."""
+        from src.constants import ALL_ICONS, ICON_CATEGORIES, GLOBAL_EMOJI_ENGINE
+        from src.qt_components import AddNoteDialog, AddTaskDialog
+
+        # 1. Verify dataset completeness and backward compatibility
+        self.assertGreaterEqual(len(ALL_ICONS), 1800)
+        self.assertEqual(len(ICON_CATEGORIES), 8)
+        self.assertIn('Smileys & Emotion', ICON_CATEGORIES)
+        self.assertIn('Food & Drink', ICON_CATEGORIES)
+
+        # 2. Exact keyword queries
+        exact_tests = {
+            'water': '💧',
+            'milk': '🥛',
+            'coffee': '☕',
+            'shower': '🚿',
+            'prayer': '🤲'
+        }
+        for query, expected_emoji in exact_tests.items():
+            results = GLOBAL_EMOJI_ENGINE.search(query, limit=10)
+            self.assertIn(expected_emoji, results, f"Expected {expected_emoji} in search results for '{query}'")
+
+        # 3. Typo-tolerant and misspelled queries
+        typo_tests = {
+            'watr': '💧',
+            'mlk': '🥛',
+            'coffe': '☕',
+            'shwoer': '🚿',
+            'prayr': '🤲',
+            'dorp': '💧'
+        }
+        for typo_query, expected_emoji in typo_tests.items():
+            results = GLOBAL_EMOJI_ENGINE.search(typo_query, limit=10)
+            self.assertIn(expected_emoji, results, f"Expected {expected_emoji} in typo search results for '{typo_query}'")
+
+        # 4. AddNoteDialog icon picker search interaction
+        note_dlg = AddNoteDialog(self.window)
+        note_dlg._show_icon_picker()
+        self.assertTrue(note_dlg._icon_picker_initialized)
+        self.assertEqual(note_dlg.icon_search_input.placeholderText(), "Search Emojis")
+        self.assertTrue(note_dlg._search_results_sec.isHidden())
+
+        # Typing 'milk' into search
+        note_dlg.icon_search_input.setText("milk")
+        note_dlg._icon_search_timer.timeout.emit()
+        self.assertFalse(note_dlg._search_results_sec.isHidden())
+        self.assertGreater(note_dlg._search_results_list.count(), 0)
+
+        # Clear search
+        note_dlg.icon_search_input.setText("")
+        note_dlg._icon_search_timer.timeout.emit()
+        self.assertTrue(note_dlg._search_results_sec.isHidden())
+        note_dlg.deleteLater()
+
+        # 5. AddTaskDialog icon picker search interaction
+        task_dlg = AddTaskDialog(self.window)
+        task_dlg._show_icon_picker()
+        self.assertTrue(task_dlg._icon_picker_initialized)
+        self.assertEqual(task_dlg.icon_search_input.placeholderText(), "Search Emojis")
+        self.assertTrue(task_dlg._search_results_sec.isHidden())
+
+        # Typing 'watr' (typo) into search
+        task_dlg.icon_search_input.setText("watr")
+        task_dlg._icon_search_timer.timeout.emit()
+        self.assertFalse(task_dlg._search_results_sec.isHidden())
+        self.assertGreater(task_dlg._search_results_list.count(), 0)
+
+        # Clear search
+        task_dlg.icon_search_input.setText("")
+        task_dlg._icon_search_timer.timeout.emit()
+        self.assertTrue(task_dlg._search_results_sec.isHidden())
+        task_dlg.deleteLater()
 
 
 if __name__ == '__main__':

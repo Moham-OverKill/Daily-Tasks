@@ -44,6 +44,7 @@ class TaskManager:
     def __init__(self, data_dir=None):
         self.pages = []  # List of page dicts
         self.global_prayers = {} # Dict of global prayer tasks mapped by ID
+        self.notes = []  # List of note dicts
         self._prayer_handler = None
 
         # Allow tests to override the storage directory
@@ -153,7 +154,8 @@ class TaskManager:
             'global_prayers': {
                 k: ({**v, 'repeat_days': list(v['repeat_days'])} if 'repeat_days' in v else dict(v))
                 for k, v in self.global_prayers.items()
-            }
+            },
+            'notes': [dict(n) for n in self.notes]
         }
         self._save_queue.put(state_copy)
 
@@ -248,6 +250,77 @@ class TaskManager:
         self.save_tasks()
 
     # ═══════════════════════════════════════════════════════════
+    # NOTE MANAGEMENT
+    # ═══════════════════════════════════════════════════════════
+
+    def get_notes(self):
+        """Return a copy of the notes list"""
+        return [dict(n) for n in self.notes]
+
+    def get_note_by_id(self, note_id):
+        """Find a note by its ID and return a copy, or None if not found."""
+        note_id = str(note_id)
+        for note in self.notes:
+            if note['id'] == note_id:
+                return dict(note)
+        return None
+
+    def add_note(self, title, description="", icon="📝", shape="circle"):
+        """Create and append a new note. Shape can be 'circle' or 'square'."""
+        note = {
+            'id': str(uuid.uuid4()),
+            'title': str(title).strip(),
+            'description': str(description or "").strip(),
+            'icon': str(icon or "📝"),
+            'shape': 'square' if shape == 'square' else 'circle',
+            'created_at': datetime.now().isoformat()
+        }
+        self.notes.append(note)
+        self.save_tasks()
+        return note
+
+    def update_note(self, note_id, title, description="", icon=None, shape="circle"):
+        """Update an existing note's details."""
+        note_id = str(note_id)
+        for note in self.notes:
+            if note['id'] == note_id:
+                old_icon = note.get('icon')
+                note['title'] = str(title).strip()
+                note['description'] = str(description or "").strip()
+                if icon is not None:
+                    note['icon'] = str(icon)
+                note['shape'] = 'square' if shape == 'square' else 'circle'
+                self.save_tasks()
+                if old_icon and old_icon != note.get('icon') and ('cache' in old_icon or not os.path.isabs(old_icon)):
+                    self._schedule_cache_cleanup()
+                return True
+        return False
+
+    def delete_note(self, note_id):
+        """Delete a note by its ID."""
+        note_id = str(note_id)
+        before = len(self.notes)
+        self.notes = [n for n in self.notes if n['id'] != note_id]
+        if len(self.notes) < before:
+            self.save_tasks()
+            self._schedule_cache_cleanup()
+            return True
+        return False
+
+    def reorder_notes(self, new_order_ids):
+        """Reorder notes based on a list of note IDs."""
+        note_map = {n['id']: n for n in self.notes}
+        new_notes = []
+        for nid in new_order_ids:
+            if nid in note_map:
+                new_notes.append(note_map[nid])
+        for n in self.notes:
+            if n['id'] not in note_map or n['id'] not in new_order_ids:
+                new_notes.append(n)
+        self.notes = new_notes
+        self.save_tasks()
+
+    # ═══════════════════════════════════════════════════════════
     # DATA PERSISTENCE & CACHE HYGIENE
     # ═══════════════════════════════════════════════════════════
 
@@ -265,6 +338,7 @@ class TaskManager:
                 'tasks': clean
             }]
             self.global_prayers = {}
+            self.notes = []
             self.save_tasks()  # Save in new format immediately
             return
 
@@ -272,11 +346,24 @@ class TaskManager:
         if isinstance(data, dict) and 'pages' in data:
             pages = data['pages']
             global_prayers = data.get('global_prayers', {})
+            raw_notes = data.get('notes', [])
             if not isinstance(pages, list):
                 raise ValueError(f"Expected pages list, got {type(pages).__name__}")
             if not isinstance(global_prayers, dict):
                 global_prayers = {}
             self.global_prayers = global_prayers
+            self.notes = [
+                {
+                    'id': str(n.get('id', uuid.uuid4())),
+                    'title': str(n.get('title', '')).strip(),
+                    'description': str(n.get('description', '')).strip(),
+                    'icon': str(n.get('icon', '📝')),
+                    'shape': 'square' if n.get('shape') == 'square' else 'circle',
+                    'created_at': n.get('created_at', datetime.now().isoformat())
+                }
+                for n in raw_notes
+                if isinstance(n, dict) and n.get('title')
+            ]
 
             # Validate each page and migrate prayers out
             clean_pages = []
@@ -377,6 +464,12 @@ class TaskManager:
             for task in self.global_prayers.values():
                 if isinstance(task, dict):
                     img = task.get('image_path')
+                    if img and isinstance(img, str):
+                        referenced_basenames.add(os.path.basename(img))
+
+            for note in self.notes:
+                if isinstance(note, dict):
+                    img = note.get('icon') or note.get('image_path')
                     if img and isinstance(img, str):
                         referenced_basenames.add(os.path.basename(img))
 

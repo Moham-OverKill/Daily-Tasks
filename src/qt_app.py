@@ -20,12 +20,12 @@ from PySide6.QtWidgets import (
     QAbstractButton, QComboBox, QSlider, QLineEdit, QTextEdit, QPlainTextEdit
 )
 from . import share_handler
-from PySide6.QtCore import Qt, QTimer, Signal, QCoreApplication, QEvent, QPoint, QPointF, QRectF, QObject, QEasingCurve, QVariantAnimation
+from PySide6.QtCore import Qt, QTimer, Signal, QCoreApplication, QEvent, QPoint, QPointF, QRect, QRectF, QObject, QEasingCurve, QVariantAnimation
 from PySide6.QtGui import QFont, QFontDatabase, QIcon, QPixmap, QPainter, QColor, QAction, QCursor, QPen, QBrush, QLinearGradient
 
 from .qt_effects import ParticleBackground
 from .qt_components import (
-    TaskCard, Sidebar, AddTaskDialog, SettingsPanel, CustomTitleBar,
+    TaskCard, Sidebar, AddTaskDialog, AddNoteDialog, SettingsPanel, CustomTitleBar,
     ModernDialogs, PageButton, InfoBadge, _draw_dashed_rounded_rect,
     get_theme_spec, is_light_theme, apply_window_theme_frame, THEME_OPTIONS
 )
@@ -611,10 +611,17 @@ class DailyTasksWindow(QMainWindow):
         self.sidebar.page_export.connect(self._export_page)
         self.sidebar.page_mute_toggle.connect(self._on_page_mute_toggle)
         self.sidebar.page_reordered.connect(self._on_page_reordered)
+
+        # Note signals
+        self.sidebar.note_add_clicked.connect(self._on_note_add)
+        self.sidebar.note_edit_requested.connect(self._on_note_edit)
+        self.sidebar.note_delete_requested.connect(self._on_note_delete)
+
         container_layout.addWidget(self.sidebar)
         
-        # Initialize page list in sidebar
+        # Initialize page and note lists in sidebar
         self._refresh_page_list()
+        self._refresh_notes_list()
         
         # Task scroll area
         self.scroll = QScrollArea()
@@ -779,7 +786,7 @@ class DailyTasksWindow(QMainWindow):
         if etype not in self._FILTERED_EVENTS:
             return False
 
-        if not self.isVisible() or self.isMinimized() or QApplication.activeWindow() is None:
+        if not self.isVisible() or self.isMinimized():
             return False
 
         if etype == QEvent.MouseMove:
@@ -789,8 +796,9 @@ class DailyTasksWindow(QMainWindow):
                 pos = self.mapFromGlobal(QCursor.pos())
                 if not self.isMaximized():
                     self._update_resize_cursor(pos)
-                if hasattr(self, 'particles'):
-                    self.particles.on_mouse_move(pos.x(), pos.y())
+                if hasattr(self, 'particles') and self.particles is not None:
+                    part_pos = self.particles.mapFromGlobal(QCursor.pos())
+                    self.particles.on_mouse_move(part_pos.x(), part_pos.y())
 
         elif etype == QEvent.Enter:
             if isinstance(obj, (QAbstractButton, QComboBox, QSlider)):
@@ -805,6 +813,27 @@ class DailyTasksWindow(QMainWindow):
         elif etype == QEvent.MouseButtonPress:
             btn = event.button()
             if btn == Qt.LeftButton:
+                # Dismiss settings panel if open and user left-clicks outside of it
+                if self._settings_panel is not None and not self._settings_panel.isHidden():
+                    panel_rect = QRect(self._settings_panel.mapToGlobal(QPoint(0, 0)), self._settings_panel.size())
+                    click_pos = event.globalPosition().toPoint() if hasattr(event, 'globalPosition') else event.globalPos()
+                    is_in_panel = (obj is self._settings_panel) or self._settings_panel.isAncestorOf(obj) or panel_rect.contains(click_pos)
+
+                    is_combo_popup = False
+                    if hasattr(self._settings_panel, 'theme_combo'):
+                        v = self._settings_panel.theme_combo.view()
+                        if v and v.isVisible():
+                            is_combo_popup = (obj is v) or v.isAncestorOf(obj) or QRect(v.mapToGlobal(QPoint(0, 0)), v.size()).contains(click_pos)
+
+                    is_sidebar_settings_btn = hasattr(self, 'sidebar') and getattr(self.sidebar, 'settings_btn', None) is not None and (
+                        (obj is self.sidebar.settings_btn) or self.sidebar.settings_btn.isAncestorOf(obj)
+                    )
+
+                    if not is_in_panel and not is_combo_popup and not is_sidebar_settings_btn:
+                        self.sound_manager.play_click()
+                        self._settings_panel.close_clicked.emit()
+                        return True
+
                 if not self.isMaximized():
                     pos = self.mapFromGlobal(QCursor.pos())
                     edge = self._update_resize_cursor(pos)
@@ -848,8 +877,9 @@ class DailyTasksWindow(QMainWindow):
             
     def mouseMoveEvent(self, event):
         """Pass mouse position to particles (Interactive Background)"""
-        if hasattr(self, 'particles'):
-            self.particles.on_mouse_move(event.pos().x(), event.pos().y())
+        if hasattr(self, 'particles') and self.particles is not None:
+            part_pos = self.particles.mapFromGlobal(event.globalPosition().toPoint()) if hasattr(event, 'globalPosition') else self.particles.mapFrom(self, event.pos())
+            self.particles.on_mouse_move(part_pos.x(), part_pos.y())
             
     def _regrid_tasks(self):
         """Reposition task cards in grid without recreating"""
@@ -1578,7 +1608,8 @@ class DailyTasksWindow(QMainWindow):
         
         if action == "import":
             try:
-                decoded_page_name, tasks = share_handler.decode_tasks(share_id_text)
+                decoded = share_handler.decode_tasks(share_id_text)
+                decoded_page_name, tasks = decoded[0], decoded[1]
                 if not tasks:
                     ModernDialogs.show_message(self, "Import Error", "Invalid Share ID.", theme=self.current_theme)
                     return
@@ -1587,6 +1618,22 @@ class DailyTasksWindow(QMainWindow):
                 
                 page = self.task_manager.import_tasks_as_page(final_name, tasks)
                 self.active_page_id = page['id']
+
+                # Import bundled notes if present in routine
+                imported_notes = getattr(decoded, 'notes', [])
+                if imported_notes:
+                    existing_notes = self.task_manager.get_notes()
+                    existing_keys = {(n.get('title'), n.get('description')) for n in existing_notes}
+                    for n in imported_notes:
+                        if (n.get('title'), n.get('description')) not in existing_keys:
+                            self.task_manager.add_note(
+                                title=n.get('title', ''),
+                                description=n.get('description', ''),
+                                icon=n.get('icon', '📝'),
+                                shape=n.get('shape', 'circle')
+                            )
+                    self._refresh_notes_list()
+
                 self._refresh_page_list()
                 self._load_tasks()
                 self.save_settings()
@@ -1677,7 +1724,11 @@ class DailyTasksWindow(QMainWindow):
             return
             
         try:
-            share_id = share_handler.encode_tasks(shareable_tasks, page_name=page_name)
+            share_id = share_handler.encode_tasks(
+                shareable_tasks,
+                page_name=page_name,
+                notes=self.task_manager.get_notes()
+            )
             QApplication.clipboard().setText(share_id)
             self.sidebar.show_copy_feedback(page_id)
             
@@ -1699,6 +1750,77 @@ class DailyTasksWindow(QMainWindow):
         new_mute = self.task_manager.toggle_mute(page_id)
         self.sidebar.update_page_mute(page_id, new_mute)
         self._update_app_icon()
+
+    # ═══════════════════════════════════════════════════════════
+    # NOTE MANAGEMENT HANDLERS
+    # ═══════════════════════════════════════════════════════════
+
+    def _refresh_notes_list(self):
+        """Refresh the sidebar notes icon list"""
+        notes = self.task_manager.get_notes()
+        self.sidebar.set_notes(notes)
+
+    def _on_note_add(self):
+        """Open AddNoteDialog to create a new note"""
+        try:
+            dialog = AddNoteDialog(self, icon_categories=ICON_CATEGORIES, theme=self.current_theme)
+            if dialog.exec() == QDialog.Accepted:
+                data = dialog.get_note_data()
+                if data and data.get('title'):
+                    self.task_manager.add_note(
+                        title=data['title'],
+                        description=data.get('description', ''),
+                        icon=data.get('icon', '📝'),
+                        shape=data.get('shape', 'circle')
+                    )
+                    self._refresh_notes_list()
+            dialog.deleteLater()
+        except Exception as e:
+            ModernDialogs.show_message(self, "Error", f"Failed to add note:\n{str(e)}", theme=self.current_theme)
+            import traceback
+            traceback.print_exc()
+
+    def _on_note_edit(self, note_id):
+        """Open AddNoteDialog in edit mode for the given note"""
+        note = self.task_manager.get_note_by_id(note_id)
+        if not note:
+            return
+        try:
+            dialog = AddNoteDialog(self, note_data=note, icon_categories=ICON_CATEGORIES, theme=self.current_theme)
+            res = dialog.exec()
+            if res == QDialog.Accepted:
+                data = dialog.get_note_data()
+                if data and data.get('title'):
+                    self.task_manager.update_note(
+                        note_id=note_id,
+                        title=data['title'],
+                        description=data.get('description', ''),
+                        icon=data.get('icon', '📝'),
+                        shape=data.get('shape', 'circle')
+                    )
+                    self._refresh_notes_list()
+            elif res == 2:  # Delete requested from within dialog
+                self._on_note_delete(note_id)
+            dialog.deleteLater()
+        except Exception as e:
+            ModernDialogs.show_message(self, "Error", f"Failed to edit note:\n{str(e)}", theme=self.current_theme)
+            import traceback
+            traceback.print_exc()
+
+    def _on_note_delete(self, note_id):
+        """Delete note after user confirmation"""
+        note = self.task_manager.get_note_by_id(note_id)
+        if not note:
+            return
+        title = note.get('title', 'this note')
+        confirm = ModernDialogs.confirm(
+            self, "Delete Note",
+            f"Are you sure you want to delete note '{title}'?",
+            theme=self.current_theme
+        )
+        if confirm:
+            self.task_manager.delete_note(note_id)
+            self._refresh_notes_list()
             
     def _edit_task(self, task):
         """Open dialog to edit task"""
