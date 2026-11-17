@@ -449,7 +449,7 @@ class TestUIAppLaunch(unittest.TestCase):
         from src.qt_components import THEME_OPTIONS
 
         # 1. Verify semantic version parsing and comparison
-        self.assertEqual(APP_VERSION, "1.5.1")
+        self.assertEqual(APP_VERSION, "1.5.4")
         self.assertEqual(parse_version("v1.3.0"), (1, 3, 0))
         self.assertEqual(parse_version("1.2"), (1, 2, 0))
         self.assertEqual(parse_version("v2.0.1-beta"), (2, 0, 1))
@@ -1122,6 +1122,36 @@ class TestUIAppLaunch(unittest.TestCase):
         task_dlg._icon_search_timer.timeout.emit()
         self.assertTrue(task_dlg._search_results_sec.isHidden())
         task_dlg.deleteLater()
+
+    def test_emoji_resolver_and_unclipped_assets(self):
+        """Verify unclipped Fluent 3D PNG asset resolution and NoteIconButton zero-clipping rendering."""
+        from src.emoji_resolver import emoji_to_hex, resolve_emoji_asset
+        from src.qt_components import NoteIconButton
+        import os
+
+        # 1. Hex normalization
+        self.assertEqual(emoji_to_hex("💧"), "1f4a7")
+        self.assertEqual(emoji_to_hex("🍩"), "1f369")
+        self.assertEqual(emoji_to_hex("🤍"), "1f90d")
+        self.assertEqual(emoji_to_hex("🎮"), "1f3ae")
+        self.assertEqual(emoji_to_hex("📝"), "1f4dd")
+        # Variation selector stripping
+        self.assertEqual(emoji_to_hex("⭐\ufe0f"), "2b50")
+
+        # 2. Asset resolution
+        for glyph in ["💧", "🍩", "🤍", "🎮", "📝"]:
+            asset_path = resolve_emoji_asset(glyph)
+            self.assertIsNotNone(asset_path, f"Asset for {glyph} must resolve to a valid path")
+            self.assertTrue(os.path.isfile(asset_path), f"Asset file must exist at {asset_path}")
+
+        # 3. NoteIconButton offscreen rendering
+        note_btn = NoteIconButton(note_data={'id': 'test', 'title': 'Test', 'icon': '💧', 'shape': 'circle'})
+        note_btn.resize(44, 44)
+        pix = note_btn.grab()
+        self.assertFalse(pix.isNull())
+        self.assertEqual(pix.width(), 44)
+        self.assertEqual(pix.height(), 44)
+        note_btn.deleteLater()
 
 
 if __name__ == '__main__':

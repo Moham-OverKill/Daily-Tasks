@@ -102,6 +102,7 @@ a = Analysis(
         'src.sound_manager',
         'src.api_handler',
         'src.updater',
+        'src.emoji_resolver',
         'shutil',
         'uuid',
     ],

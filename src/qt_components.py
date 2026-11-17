@@ -29,6 +29,7 @@ import sys
 import shutil
 import uuid
 from .constants import APP_VERSION, GLOBAL_EMOJI_ENGINE, GITHUB_RELEASES_PAGE_URL
+from .emoji_resolver import resolve_emoji_asset
 
 _TIME_FMT_CACHE = {}
 
@@ -1409,17 +1410,9 @@ class TaskCard(QFrame):
                 return
             self._last_rendered_icon = icon_val
             
-            # Identify if this is a path (contains slashes, image extensions, or internal cache keywords)
-            is_path = any(s in icon_val.lower() for s in ['\\', '/', '.png', '.jpg', '.jpeg', '.webp', 'cache', 'custom'])
-            
-            if is_path:
-                # Resolve relative cache paths to absolute AppData
-                if not os.path.isabs(icon_val) and 'cache' in icon_val:
-                    appdata = os.getenv('APPDATA', os.path.expanduser('~'))
-                    resolved_path = os.path.normpath(os.path.join(appdata, 'DailyTasks', icon_val))
-                else:
-                    resolved_path = icon_val
-
+            # Resolve via resolve_emoji_asset (checks custom images and 3D Fluent emoji assets)
+            resolved_path = resolve_emoji_asset(icon_val)
+            if resolved_path:
                 scaled_pixmap = TaskCard._PIXMAP_CACHE.get(resolved_path)
                 if scaled_pixmap is not None:
                     TaskCard._PIXMAP_CACHE.move_to_end(resolved_path)
@@ -1441,10 +1434,9 @@ class TaskCard(QFrame):
                     self.icon_label.setPixmap(scaled_pixmap)
                     return
                 else:
-                    # STRICT FALLBACK: Never show path string as text
                     icon_val = '❓'
-                    
-            # Render as Emoji (Only reached if not a path, or if path was invalid and fell back to ❓)
+
+            # Render as Emoji (Only reached if no asset was found, or if asset was invalid)
             self.icon_label.setPixmap(QPixmap()) 
             self.icon_label.setFont(QFont("Segoe UI Emoji", 42))
             self.icon_label.setText(icon_val)
@@ -2733,16 +2725,12 @@ class NoteIconButton(AnimatedPushButton):
         painter.setPen(QPen(border_col, border_w))
         painter.drawRoundedRect(rect, radius, radius)
 
-        # Draw icon inside unconstrained 44x44 area to ensure zero clipping
-        is_path = any(s in self.icon_val.lower() for s in ['\\', '/', '.png', '.jpg', '.jpeg', '.webp'])
-        if is_path:
-            resolved_path = self.icon_val
-            if not os.path.isabs(resolved_path) and 'cache' in resolved_path:
-                appdata = os.getenv('APPDATA', os.path.expanduser('~'))
-                resolved_path = os.path.normpath(os.path.join(appdata, 'DailyTasks', resolved_path))
-            pix = QPixmap(resolved_path)
+        # Draw icon: prioritize unclipped 3D Fluent emoji assets and custom images
+        resolved_asset = resolve_emoji_asset(self.icon_val)
+        if resolved_asset:
+            pix = QPixmap(resolved_asset)
             if not pix.isNull():
-                scaled = pix.scaled(22, 22, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                scaled = pix.scaled(24, 24, Qt.KeepAspectRatio, Qt.SmoothTransformation)
                 ix = int((w - scaled.width()) * 0.5)
                 iy = int((h - scaled.height()) * 0.5)
                 painter.drawPixmap(ix, iy, scaled)
@@ -4905,15 +4893,8 @@ class AddTaskDialog(QDialog):
             icon_val = self.selected_icon if self.selected_icon else "❓"
             if not isinstance(icon_val, str): icon_val = str(icon_val)
 
-            is_path = any(s in icon_val.lower() for s in ['\\', '/', '.png', '.jpg', '.jpeg', '.webp'])
-            
-            if is_path:
-                if not os.path.isabs(icon_val) and 'cache' in icon_val:
-                    appdata = os.getenv('APPDATA', os.path.expanduser('~'))
-                    resolved_path = os.path.normpath(os.path.join(appdata, 'DailyTasks', icon_val))
-                else:
-                    resolved_path = icon_val
-
+            resolved_path = resolve_emoji_asset(icon_val)
+            if resolved_path:
                 raw_pixmap = QPixmap(resolved_path)
                 if not raw_pixmap.isNull():
                     scaled_preview = raw_pixmap.scaled(
@@ -5516,9 +5497,10 @@ class AddNoteDialog(QDialog):
         self.select_icon_btn.clicked.connect(self._show_icon_picker)
         icon_row.addWidget(self.select_icon_btn)
 
-        self.or_label = QLabel("or")
-        self.or_label.setStyleSheet("font-size: 11px;")
-        icon_row.addWidget(self.or_label)
+        self.shape_toggle_btn = QPushButton("Shape: Circle" if self.selected_shape == 'circle' else "Shape: Square")
+        self.shape_toggle_btn.setCursor(Qt.PointingHandCursor)
+        self.shape_toggle_btn.clicked.connect(self._toggle_shape)
+        icon_row.addWidget(self.shape_toggle_btn)
 
         self.custom_img_btn = QPushButton("Custom Image")
         self.custom_img_btn.setCursor(Qt.PointingHandCursor)
@@ -5591,6 +5573,8 @@ class AddNoteDialog(QDialog):
 
     def _set_shape(self, shape):
         self.selected_shape = 'square' if shape == 'square' else 'circle'
+        if hasattr(self, 'shape_toggle_btn'):
+            self.shape_toggle_btn.setText("Shape: Circle" if self.selected_shape == 'circle' else "Shape: Square")
         self._update_icon_preview()
 
     def _toggle_shape(self):
@@ -5622,12 +5606,8 @@ class AddNoteDialog(QDialog):
             }}
         """)
 
-        is_path = any(s in str(icon_val).lower() for s in ['\\', '/', '.png', '.jpg', '.jpeg', '.webp'])
-        if is_path:
-            resolved_path = icon_val
-            if not os.path.isabs(resolved_path) and 'cache' in resolved_path:
-                appdata = os.getenv('APPDATA', os.path.expanduser('~'))
-                resolved_path = os.path.normpath(os.path.join(appdata, 'DailyTasks', resolved_path))
+        resolved_path = resolve_emoji_asset(icon_val)
+        if resolved_path:
             raw = QPixmap(resolved_path)
             if not raw.isNull():
                 scaled = raw.scaled(30, 30, Qt.KeepAspectRatio, Qt.SmoothTransformation)
