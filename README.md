@@ -43,6 +43,18 @@ python start.py
 
 ---
 
+## Code Signing & Integrity
+
+Free code signing provided by [SignPath.io](https://signpath.io/) certificate courtesy of the [SignPath Foundation](https://signpath.org/).
+
+---
+
+## Privacy Policy
+
+Daily Tasks is an offline-first desktop application. All data, tasks, notes, and user settings are stored locally on your device in `%APPDATA%\DailyTasks`. No personal data, tracking identifiers, or telemetry are collected, transmitted, or shared.
+
+---
+
 ## License
 
 Free for personal and commercial use. See [license.txt](license.txt) for details.
