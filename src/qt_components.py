@@ -2707,7 +2707,7 @@ class NoteIconButton(AnimatedPushButton):
         radius = 18.0 if self.shape == 'circle' else 8.0
 
         if self._is_dragging:
-            painter.setOpacity(0.35)
+            return  # Do not draw button at old location while being dragged
 
         # Subtle outer glow halo on hover
         if t > 0.01:
@@ -2825,7 +2825,7 @@ class NoteIconButton(AnimatedPushButton):
             return
         if self._drag_start_pos is None:
             return
-        if (event.pos() - self._drag_start_pos).manhattanLength() >= 5:
+        if (event.pos() - self._drag_start_pos).manhattanLength() >= 4:
             self._start_drag(event)
             return
         super().mouseMoveEvent(event)
@@ -3044,9 +3044,20 @@ class DraggableNotesGridWidget(QWidget):
     def dragMoveEvent(self, event):
         if event.mimeData().hasFormat('application/x-note-id') and self._drag_source_id:
             pos = event.position().toPoint()
-            col = max(0, min(3, (pos.x() - 6 + 25) // 50))
-            row = max(0, (pos.y() - 4 + 25) // 50)
-            target = max(0, min(row * 4 + col, len(self.note_buttons) - 1))
+            # Proximity-based slot target detection gives a generous, forgiving drag area
+            best_idx = 0
+            best_dist = float('inf')
+            n_notes = len(self.note_buttons)
+            for i in range(n_notes):
+                slot_center = self.get_slot_pos(i) + QPoint(22, 22)
+                dx = pos.x() - slot_center.x()
+                dy = pos.y() - slot_center.y()
+                dist_sq = dx * dx + dy * dy
+                if dist_sq < best_dist:
+                    best_dist = dist_sq
+                    best_idx = i
+
+            target = max(0, min(best_idx, n_notes - 1))
 
             if target != self._target_idx and target >= 0:
                 self._target_idx = target
@@ -3093,6 +3104,7 @@ class DraggableNotesGridWidget(QWidget):
             if source_btn and self._target_idx != -1 and self._target_idx != self._source_idx:
                 self.note_buttons.remove(source_btn)
                 self.note_buttons.insert(self._target_idx, source_btn)
+                source_btn.move(self.get_slot_pos(self._target_idx))
                 self.order_changed.emit([b.note_id for b in self.note_buttons])
 
             for i, btn in enumerate(self.note_buttons):
