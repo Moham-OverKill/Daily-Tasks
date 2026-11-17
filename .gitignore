@@ -31,6 +31,7 @@ tests/scratch_data/
 # IDE / Operating System artifacts
 .idea/
 .vscode/
+.local/
 .DS_Store
 Thumbs.db
 desktop.ini
