@@ -51,6 +51,8 @@ class TestUIAppLaunch(unittest.TestCase):
                 self.window.particles.stop()
             if hasattr(self.window, 'sound_manager') and self.window.sound_manager is not None:
                 self.window.sound_manager.close()
+            if hasattr(self.window, 'task_manager') and hasattr(self.window.task_manager, '_save_queue'):
+                self.window.task_manager._save_queue.join()
             self.window.close()
 
 

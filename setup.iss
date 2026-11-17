@@ -94,7 +94,8 @@ var
 begin
   if CurStep = ssInstall then
   begin
-    if WizardIsTaskSelected('clean_install_v2') then
+    // Clean install ONLY if run interactively AND user explicitly checked the box
+    if (not WizardSilent()) and WizardIsTaskSelected('clean_install_v2') then
     begin
       AppDataPath := ExpandConstant('{userappdata}\DailyTasks');
       if DirExists(AppDataPath) then

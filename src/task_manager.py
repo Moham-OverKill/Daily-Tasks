@@ -362,7 +362,7 @@ class TaskManager:
                     'created_at': n.get('created_at', datetime.now().isoformat())
                 }
                 for n in raw_notes
-                if isinstance(n, dict) and n.get('title')
+                if isinstance(n, dict) and (n.get('title') or n.get('description') or n.get('icon') or n.get('id'))
             ]
 
             # Validate each page and migrate prayers out
