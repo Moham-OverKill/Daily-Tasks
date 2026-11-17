@@ -11,7 +11,7 @@ A simple Windows desktop app to help you organize your daily routines, build goo
 
 - **Daily Task Tracking**: Add your tasks, set their times, and check them off as you go.
 - **Routines & Pages**: Organize tasks into different lists—like Morning Routine, Work, Gym, or Study.
-- **Sidebar Notes**: Add quick notes and checklists directly under each routine page with customizable emoji badges.
+- **Sidebar Notes**: Add quick notes and checklists directly in your sidebar with customizable emoji badges.
 - **Reminders & Alerts**: Helpful sound alerts and notifications when it's time to begin a task.
 - **Prayer Times**: Shows your daily prayer schedule automatically throughout the day.
 - **Share Routines**: Export your routine and notes to share with others or import someone else's setup in seconds.
