@@ -120,6 +120,18 @@ class TaskManager:
                                 raise
                             time.sleep(0.015)
 
+                    # Keep independent notes_store.json in sync to guarantee survival across downgrades/upgrades
+                    if 'notes' in state:
+                        notes_store_path = os.path.join(os.path.dirname(self._data_file), 'notes_store.json')
+                        notes_tmp = f"{notes_store_path}.{threading.get_ident()}.tmp"
+                        try:
+                            with open(notes_tmp, 'w', encoding='utf-8') as nf:
+                                json.dump({'notes': state.get('notes', [])}, nf, indent=2)
+                                nf.flush()
+                            os.replace(notes_tmp, notes_store_path)
+                        except Exception:
+                            pass
+
                 if run_cleanup:
                     self.cleanup_orphaned_cache_images()
 
@@ -347,6 +359,18 @@ class TaskManager:
             pages = data['pages']
             global_prayers = data.get('global_prayers', {})
             raw_notes = data.get('notes', [])
+            if not raw_notes:
+                notes_store_path = os.path.join(os.path.dirname(self._data_file), 'notes_store.json')
+                if os.path.exists(notes_store_path):
+                    try:
+                        with open(notes_store_path, 'r', encoding='utf-8') as nsf:
+                            ns_data = json.load(nsf)
+                            if isinstance(ns_data, dict):
+                                raw_notes = ns_data.get('notes', [])
+                            elif isinstance(ns_data, list):
+                                raw_notes = ns_data
+                    except Exception as e:
+                        print(f"Error loading notes_store.json: {e}")
             if not isinstance(pages, list):
                 raise ValueError(f"Expected pages list, got {type(pages).__name__}")
             if not isinstance(global_prayers, dict):
