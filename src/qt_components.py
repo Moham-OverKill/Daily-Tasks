@@ -2539,7 +2539,7 @@ class NoteHoverCard(QFrame):
         self._fade_anim = None
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(12, 10, 12, 10)
+        layout.setContentsMargins(12, 10, 12, 12)
         layout.setSpacing(4)
 
         self.title_label = QLabel()
@@ -2551,6 +2551,19 @@ class NoteHoverCard(QFrame):
         self.desc_label.setFont(QFont("Segoe UI", 9))
         self.desc_label.setWordWrap(True)
         layout.addWidget(self.desc_label)
+
+    def hasHeightForWidth(self) -> bool:
+        return True
+
+    def heightForWidth(self, w: int) -> int:
+        if self.layout():
+            return self.layout().totalHeightForWidth(w)
+        return 80
+
+    def sizeHint(self) -> QSize:
+        w = 220
+        h = self.heightForWidth(w) if self.layout() else 80
+        return QSize(w, max(h, 44))
 
     def set_note_content(self, title: str, description: str, theme: str = 'dark'):
         self.title_label.setText(title)
@@ -2584,7 +2597,8 @@ class NoteHoverCard(QFrame):
         """)
         self.title_label.setStyleSheet(f"color: {t_col}; background: transparent; font-weight: bold;")
         self.desc_label.setStyleSheet(f"color: {d_col}; background: transparent;")
-        self.adjustSize()
+        hint = self.sizeHint()
+        self.resize(hint)
 
     def show_animated(self, target_pos: QPoint):
         if self._fade_anim is not None:
@@ -2628,7 +2642,8 @@ class NoteHoverCard(QFrame):
 
 class NoteIconButton(AnimatedPushButton):
     """
-    Compact 38x38 sidebar note icon rendered as Circle or Square with hover popover.
+    Compact 44x44 sidebar note icon rendered as Circle or Square with hover popover
+    and smooth hold-and-drag reordering support.
     """
     edit_requested = Signal(str)
     delete_requested = Signal(str)
@@ -2643,8 +2658,10 @@ class NoteIconButton(AnimatedPushButton):
         self.shape = note_data.get('shape', 'circle')
         self.current_theme = 'dark'
         self._hover_card = None
+        self._drag_start_pos = None
+        self._is_dragging = False
 
-        self.setFixedSize(38, 38)
+        self.setFixedSize(44, 44)
         self.setCursor(Qt.PointingHandCursor)
 
     def update_note(self, note_data):
@@ -2685,12 +2702,16 @@ class NoteIconButton(AnimatedPushButton):
             painter.scale(scale, scale)
             painter.translate(-cx, -cy)
 
-        rect = QRectF(1.5, 1.5, w - 3.0, h - 3.0)
-        radius = (rect.width() * 0.5) if self.shape == 'circle' else 8.0
+        # Base 36x36 shape centered inside 44x44 footprint (4px margin on all sides)
+        rect = QRectF(4.0, 4.0, 36.0, 36.0)
+        radius = 18.0 if self.shape == 'circle' else 8.0
+
+        if self._is_dragging:
+            painter.setOpacity(0.35)
 
         # Subtle outer glow halo on hover
         if t > 0.01:
-            halo_pen = QPen(QColor(ar, ag, ab, int(45 * t)), 2.0 + 1.2 * t)
+            halo_pen = QPen(QColor(ar, ag, ab, int(45 * t)), 2.2 * t)
             painter.setPen(halo_pen)
             painter.setBrush(Qt.NoBrush)
             painter.drawRoundedRect(rect, radius, radius)
@@ -2717,9 +2738,7 @@ class NoteIconButton(AnimatedPushButton):
         painter.setPen(QPen(border_col, border_w))
         painter.drawRoundedRect(rect, radius, radius)
 
-        # Draw icon with optical baseline compensation (emojis lack alphabetical descenders)
-        float_y = 1.2 * t
-        text_lift = 1.2 + (1.2 * t)
+        # Draw icon inside unconstrained 44x44 area to ensure zero clipping
         is_path = any(s in self.icon_val.lower() for s in ['\\', '/', '.png', '.jpg', '.jpeg', '.webp'])
         if is_path:
             resolved_path = self.icon_val
@@ -2729,21 +2748,21 @@ class NoteIconButton(AnimatedPushButton):
             pix = QPixmap(resolved_path)
             if not pix.isNull():
                 scaled = pix.scaled(22, 22, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-                ix = int(rect.center().x() - scaled.width() * 0.5)
-                iy = int(rect.center().y() - scaled.height() * 0.5 - float_y)
+                ix = int((w - scaled.width()) * 0.5)
+                iy = int((h - scaled.height()) * 0.5)
                 painter.drawPixmap(ix, iy, scaled)
             else:
                 f = QFont("Segoe UI Emoji", 14)
                 f.setStyleStrategy(QFont.PreferAntialias | QFont.PreferQuality)
                 painter.setFont(f)
                 painter.setPen(QColor(spec["text_main"]))
-                painter.drawText(rect.adjusted(0, -text_lift, 0, -text_lift), Qt.AlignCenter, "❓")
+                painter.drawText(QRectF(0, 0, w, h), Qt.AlignCenter, "❓")
         else:
-            f = QFont("Segoe UI Emoji", 17)
+            f = QFont("Segoe UI Emoji", 16)
             f.setStyleStrategy(QFont.PreferAntialias | QFont.PreferQuality)
             painter.setFont(f)
             painter.setPen(QColor(spec["text_main"]))
-            painter.drawText(rect.adjusted(0, -text_lift, 0, -text_lift), Qt.AlignCenter, self.icon_val)
+            painter.drawText(QRectF(0, 0, w, h), Qt.AlignCenter, self.icon_val)
 
         if pt > 0.01:
             painter.setPen(Qt.NoPen)
@@ -2761,12 +2780,11 @@ class NoteIconButton(AnimatedPushButton):
         self._hide_hover_card()
 
     def _show_hover_card(self):
-        if not self.title:
+        if not self.title or self._is_dragging:
             return
         if self._hover_card is None:
             self._hover_card = NoteHoverCard()
         self._hover_card.set_note_content(self.title, self.description, self.current_theme)
-        self._hover_card.adjustSize()
 
         card_w = self._hover_card.width()
         card_h = self._hover_card.height()
@@ -2793,11 +2811,54 @@ class NoteIconButton(AnimatedPushButton):
             self._hover_card.hide_animated()
 
     def mousePressEvent(self, event):
-        if event.button() == Qt.RightButton:
+        if event.button() == Qt.LeftButton:
+            self._drag_start_pos = event.pos()
+            self._animate_press(1.0, duration=70, curve=QEasingCurve.OutQuad)
+        elif event.button() == Qt.RightButton:
             self._show_context_menu(event.globalPos())
             event.accept()
             return
         super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if not (event.buttons() & Qt.LeftButton):
+            return
+        if self._drag_start_pos is None:
+            return
+        if (event.pos() - self._drag_start_pos).manhattanLength() >= 5:
+            self._start_drag(event)
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            if not self._is_dragging and self._drag_start_pos is not None:
+                self.edit_requested.emit(self.note_id)
+            self._is_dragging = False
+            self._drag_start_pos = None
+            if self._press_t > 0.0:
+                self._animate_press(0.0, duration=135, curve=QEasingCurve.OutCubic)
+        super().mouseReleaseEvent(event)
+
+    def _start_drag(self, event):
+        self._hide_hover_card()
+        drag = QDrag(self)
+        mime = QMimeData()
+        mime.setData("application/x-note-id", self.note_id.encode("utf-8"))
+        drag.setMimeData(mime)
+
+        pixmap = self.grab()
+        drag.setPixmap(pixmap)
+        drag.setHotSpot(event.pos())
+
+        self._is_dragging = True
+        self.update()
+        try:
+            drag.exec(Qt.MoveAction)
+        finally:
+            self._is_dragging = False
+            self._drag_start_pos = None
+            self.update()
 
     def _show_context_menu(self, global_pos):
         self._hide_hover_card()
@@ -2841,13 +2902,13 @@ class NoteIconButton(AnimatedPushButton):
 
 class AddNoteButton(AnimatedPushButton):
     """
-    Sidebar '+ Add Note' button rendered as a 38x38 square with a dashed border
+    Sidebar '+ Add Note' button rendered as a 44x44 square with a dashed border
     and crisp vector '+' symbol, matching NoteIconButton dimensions.
     """
     def __init__(self, parent=None):
         super().__init__("+", parent)
         self.current_theme = "dark"
-        self.setFixedSize(38, 38)
+        self.setFixedSize(44, 44)
         self.setCursor(Qt.PointingHandCursor)
         self.setToolTip("Add Note")
 
@@ -2878,7 +2939,7 @@ class AddNoteButton(AnimatedPushButton):
             painter.scale(scale, scale)
             painter.translate(-cx, -cy)
 
-        rect = QRectF(1.5, 1.5, w - 3.0, h - 3.0)
+        rect = QRectF(4.0, 4.0, 36.0, 36.0)
 
         c_muted = QColor(spec["text_muted"])
         c_acc = QColor(spec["accent"])
@@ -2919,6 +2980,133 @@ class AddNoteButton(AnimatedPushButton):
         painter.end()
 
 
+class DraggableNotesGridWidget(QWidget):
+    """
+    Grid container for NoteIconButton instances supporting hold-and-drag reordering
+    with 60fps sliding transition animations as notes exchange places.
+    """
+    order_changed = Signal(list)  # list of note_id in new order
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAcceptDrops(True)
+        self.setStyleSheet("background: transparent;")
+        self.note_buttons = []
+        self.add_btn = None
+        self._drag_source_id = None
+        self._source_idx = -1
+        self._target_idx = -1
+        self._active_anims = {}
+
+    def get_slot_pos(self, index: int) -> QPoint:
+        col = index % 4
+        row = index // 4
+        x = 6 + col * 50
+        y = 4 + row * 50
+        return QPoint(x, y)
+
+    def set_items(self, buttons: list, add_btn: QWidget):
+        self._clear_animations()
+        self.note_buttons = list(buttons)
+        self.add_btn = add_btn
+
+        for i, btn in enumerate(self.note_buttons):
+            btn.setParent(self)
+            btn.move(self.get_slot_pos(i))
+            btn.show()
+
+        if self.add_btn:
+            self.add_btn.setParent(self)
+            self.add_btn.move(self.get_slot_pos(len(self.note_buttons)))
+            self.add_btn.show()
+
+        self._update_geometry()
+
+    def _update_geometry(self):
+        total_items = len(self.note_buttons) + (1 if self.add_btn else 0)
+        rows = max(1, (total_items + 3) // 4)
+        total_h = rows * 50 + 8
+        self.setFixedSize(214, total_h)
+
+    def _clear_animations(self):
+        for anim in list(self._active_anims.values()):
+            anim.stop()
+            anim.deleteLater()
+        self._active_anims.clear()
+
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasFormat('application/x-note-id'):
+            self._drag_source_id = event.mimeData().data('application/x-note-id').data().decode('utf-8')
+            self._source_idx = next((i for i, b in enumerate(self.note_buttons) if b.note_id == self._drag_source_id), -1)
+            self._target_idx = self._source_idx
+            event.acceptProposedAction()
+
+    def dragMoveEvent(self, event):
+        if event.mimeData().hasFormat('application/x-note-id') and self._drag_source_id:
+            pos = event.position().toPoint()
+            col = max(0, min(3, (pos.x() - 6 + 25) // 50))
+            row = max(0, (pos.y() - 4 + 25) // 50)
+            target = max(0, min(row * 4 + col, len(self.note_buttons) - 1))
+
+            if target != self._target_idx and target >= 0:
+                self._target_idx = target
+                temp = [b for b in self.note_buttons if b.note_id != self._drag_source_id]
+                source_btn = next((b for b in self.note_buttons if b.note_id == self._drag_source_id), None)
+                if source_btn:
+                    temp.insert(self._target_idx, source_btn)
+
+                for slot_idx, btn in enumerate(temp):
+                    if btn == source_btn:
+                        continue
+                    dest = self.get_slot_pos(slot_idx)
+                    if btn.pos() != dest:
+                        self._animate_button_to(btn, dest)
+
+            event.acceptProposedAction()
+
+    def _animate_button_to(self, btn, dest: QPoint):
+        old_anim = self._active_anims.get(btn)
+        if old_anim is not None:
+            old_anim.stop()
+            old_anim.deleteLater()
+
+        anim = QPropertyAnimation(btn, b"pos", self)
+        anim.setDuration(135)
+        anim.setStartValue(btn.pos())
+        anim.setEndValue(dest)
+        anim.setEasingCurve(QEasingCurve.OutCubic)
+        self._active_anims[btn] = anim
+        anim.start()
+
+    def dragLeaveEvent(self, event):
+        for i, btn in enumerate(self.note_buttons):
+            dest = self.get_slot_pos(i)
+            if btn.pos() != dest:
+                self._animate_button_to(btn, dest)
+        self._target_idx = -1
+        event.accept()
+
+    def dropEvent(self, event):
+        if event.mimeData().hasFormat('application/x-note-id') and self._drag_source_id:
+            source_id = self._drag_source_id
+            source_btn = next((b for b in self.note_buttons if b.note_id == source_id), None)
+            if source_btn and self._target_idx != -1 and self._target_idx != self._source_idx:
+                self.note_buttons.remove(source_btn)
+                self.note_buttons.insert(self._target_idx, source_btn)
+                self.order_changed.emit([b.note_id for b in self.note_buttons])
+
+            for i, btn in enumerate(self.note_buttons):
+                dest = self.get_slot_pos(i)
+                self._animate_button_to(btn, dest)
+
+            if self.add_btn:
+                self.add_btn.move(self.get_slot_pos(len(self.note_buttons)))
+
+            self._drag_source_id = None
+            self._target_idx = -1
+            event.acceptProposedAction()
+
+
 class Sidebar(QFrame):
     """
     Semi-transparent sidebar with page navigation and controls.
@@ -2940,6 +3128,7 @@ class Sidebar(QFrame):
     note_add_clicked = Signal()
     note_edit_requested = Signal(str)    # note_id
     note_delete_requested = Signal(str)  # note_id
+    note_reordered = Signal(list)        # new_order_list
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -3062,12 +3251,8 @@ class Sidebar(QFrame):
             }
         """)
 
-        self.notes_container = QWidget()
-        self.notes_container.setStyleSheet("background: transparent;")
-        self.notes_layout = QGridLayout(self.notes_container)
-        self.notes_layout.setAlignment(Qt.AlignLeft | Qt.AlignTop)
-        self.notes_layout.setSpacing(8)
-        self.notes_layout.setContentsMargins(2, 4, 2, 4)
+        self.notes_container = DraggableNotesGridWidget()
+        self.notes_container.order_changed.connect(self.note_reordered.emit)
         self.notes_scroll.setWidget(self.notes_container)
         layout.addWidget(self.notes_scroll)
 
@@ -3182,36 +3367,23 @@ class Sidebar(QFrame):
             btn.deleteLater()
         self._note_buttons.clear()
 
-        while self.notes_layout.count():
-            item = self.notes_layout.takeAt(0)
-            w = item.widget()
-            if w and w != self._add_note_btn:
-                w.deleteLater()
-
         self.notes_scroll.show()
-        cols = 4
-        for idx, note in enumerate(notes):
+        buttons = []
+        for note in notes:
             nid = str(note.get('id', ''))
-            btn = NoteIconButton(note_data=note, parent=self.notes_container)
+            btn = NoteIconButton(note_data=note)
             btn.apply_theme(self.current_theme)
             btn.edit_requested.connect(self.note_edit_requested.emit)
             btn.delete_requested.connect(self.note_delete_requested.emit)
-
-            row = idx // cols
-            col = idx % cols
-            self.notes_layout.addWidget(btn, row, col, Qt.AlignLeft | Qt.AlignTop)
+            buttons.append(btn)
             self._note_buttons[nid] = btn
 
-        # Position the '+ Add Note' empty square with dashed edges in the next slot
-        add_idx = len(notes)
-        add_row = add_idx // cols
-        add_col = add_idx % cols
         self._add_note_btn.apply_theme(self.current_theme)
-        self.notes_layout.addWidget(self._add_note_btn, add_row, add_col, Qt.AlignLeft | Qt.AlignTop)
+        self.notes_container.set_items(buttons, self._add_note_btn)
 
         total_items = len(notes) + 1
-        rows = (total_items + cols - 1) // cols
-        calculated_height = min(150, max(46, rows * 44 + 8))
+        rows = max(1, (total_items + 3) // 4)
+        calculated_height = min(165, max(56, rows * 50 + 10))
         self.notes_scroll.setFixedHeight(calculated_height)
 
     def resizeEvent(self, event):

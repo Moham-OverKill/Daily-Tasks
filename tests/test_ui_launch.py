@@ -931,6 +931,8 @@ class TestUIAppLaunch(unittest.TestCase):
 
             # 3. NoteIconButton & Hover Card validation
             btn1 = sidebar._note_buttons[n1['id']]
+            self.assertEqual(btn1.width(), 44)
+            self.assertEqual(btn1.height(), 44)
             self.assertEqual(btn1.shape, "circle")
             self.assertEqual(btn1.icon_val, "📚")
             btn1._show_hover_card()
@@ -940,9 +942,29 @@ class TestUIAppLaunch(unittest.TestCase):
             self.assertTrue(btn1._hover_card.pos().y() < btn1.mapToGlobal(QPoint(0, 0)).y())
             btn1._hide_hover_card()
 
+            # Dynamic height-for-width validation (prevents chopped description text)
+            hover_test = NoteHoverCard()
+            hover_test.set_note_content("No Sugar", "Too much sugar causes fast weight gain, energy crashes, and serious health problems")
+            self.assertTrue(hover_test.hasHeightForWidth())
+            self.assertGreaterEqual(hover_test.height(), 85)
+            hover_test.deleteLater()
+
             btn2 = sidebar._note_buttons[n2['id']]
+            self.assertEqual(btn2.width(), 44)
+            self.assertEqual(btn2.height(), 44)
             self.assertEqual(btn2.shape, "square")
             self.assertEqual(btn2.icon_val, "🔥")
+
+            # 3.1 Drag-and-Drop Reordering validation
+            slot0 = sidebar.notes_container.get_slot_pos(0)
+            slot1 = sidebar.notes_container.get_slot_pos(1)
+            self.assertEqual(slot0.y(), 4)
+            self.assertGreater(slot1.x(), slot0.x())
+
+            sidebar.notes_container.order_changed.emit([n2['id'], n1['id']])
+            reordered = tm.get_notes()
+            self.assertEqual(reordered[0]['id'], n2['id'])
+            self.assertEqual(reordered[1]['id'], n1['id'])
 
             # 4. Update & Delete CRUD
             tm.update_note(n1['id'], title="Updated Title", description="New description", icon="💡", shape="square")

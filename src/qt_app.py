@@ -619,6 +619,7 @@ class DailyTasksWindow(QMainWindow):
         self.sidebar.note_add_clicked.connect(self._on_note_add)
         self.sidebar.note_edit_requested.connect(self._on_note_edit)
         self.sidebar.note_delete_requested.connect(self._on_note_delete)
+        self.sidebar.note_reordered.connect(self._on_notes_reordered)
 
         container_layout.addWidget(self.sidebar)
         
@@ -1824,6 +1825,10 @@ class DailyTasksWindow(QMainWindow):
         if confirm:
             self.task_manager.delete_note(note_id)
             self._refresh_notes_list()
+
+    def _on_notes_reordered(self, new_order: list):
+        """Handle drag-and-drop note reordering"""
+        self.task_manager.reorder_notes(new_order)
             
     def _edit_task(self, task):
         """Open dialog to edit task"""
