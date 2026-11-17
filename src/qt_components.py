@@ -4030,13 +4030,18 @@ class SettingsPanel(QFrame):
             self.update_action_btn.setText(f"Install {ver_text}")
             self.update_action_btn.setEnabled(True)
             self.update_progress_bar.hide()
-        elif self._update_state == "downloading":
+        elif self._update_state in ("downloading", "installing"):
             self.update_status_label.setOpenExternalLinks(False)
             pct = self._update_progress
-            self.update_status_label.setText(f"Downloading update... {pct}%")
-            self.update_action_btn.setText(f"{pct}%")
+            if self._update_state == "installing" or pct >= 100:
+                self.update_status_label.setText(self._update_message or "Installing . . .")
+                self.update_action_btn.setText("Installing...")
+                self.update_progress_bar.setValue(100)
+            else:
+                self.update_status_label.setText(f"Downloading update... {pct}%")
+                self.update_action_btn.setText(f"{pct}%")
+                self.update_progress_bar.setValue(pct)
             self.update_action_btn.setEnabled(False)
-            self.update_progress_bar.setValue(pct)
             self.update_progress_bar.show()
         elif self._update_state == "error":
             err_msg = self._update_message or "Update check failed"
@@ -4072,7 +4077,7 @@ class SettingsPanel(QFrame):
             status_color = "#059669" if is_light else "#34D399"
         elif self._update_state == "error":
             status_color = "#DC2626" if is_light else "#F87171"
-        elif self._update_state in ("checking", "downloading"):
+        elif self._update_state in ("checking", "downloading", "installing"):
             status_color = spec["accent"]
         else:
             status_color = spec["text_muted"]

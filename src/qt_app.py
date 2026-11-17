@@ -454,19 +454,22 @@ class DailyTasksWindow(QMainWindow):
         self._set_update_ui_state("downloading", version=version, progress=0)
 
     def _on_update_download_progress(self, pct: int):
+        state = "installing" if pct >= 100 else "downloading"
+        msg = "Installing . . ." if pct >= 100 else ""
         self._set_update_ui_state(
-            "downloading",
+            state,
             version=self._update_state.get("version", ""),
             download_url=self._update_state.get("download_url", ""),
             progress=pct,
+            message=msg,
         )
 
     def _on_update_download_finished(self, installer_path: str):
         self._set_update_ui_state(
-            "downloading",
+            "installing",
             version=self._update_state.get("version", ""),
             progress=100,
-            message="Installing update...",
+            message="Installing . . .",
         )
         self.save_settings()
         if self.update_manager is not None:

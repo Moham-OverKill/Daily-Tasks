@@ -447,7 +447,7 @@ class TestUIAppLaunch(unittest.TestCase):
         from src.qt_components import THEME_OPTIONS
 
         # 1. Verify semantic version parsing and comparison
-        self.assertEqual(APP_VERSION, "1.5.0")
+        self.assertEqual(APP_VERSION, "1.5.1")
         self.assertEqual(parse_version("v1.3.0"), (1, 3, 0))
         self.assertEqual(parse_version("1.2"), (1, 2, 0))
         self.assertEqual(parse_version("v2.0.1-beta"), (2, 0, 1))

@@ -29,12 +29,12 @@ class TestUpdaterHardening(unittest.TestCase):
         cls.app = QApplication.instance() or QApplication(sys.argv)
 
     def test_version_parsing_and_comparison(self):
-        self.assertEqual(parse_version("1.5.0"), (1, 5, 0))
-        self.assertEqual(parse_version("v1.5.1"), (1, 5, 1))
+        self.assertEqual(parse_version("1.5.1"), (1, 5, 1))
+        self.assertEqual(parse_version("v1.5.2"), (1, 5, 2))
         self.assertEqual(parse_version("v2.0.0-beta.1"), (2, 0, 0))
-        self.assertTrue(is_newer_version("1.5.1", "1.5.0"))
-        self.assertFalse(is_newer_version("1.5.0", "1.5.0"))
-        self.assertFalse(is_newer_version("1.4.9", "1.5.0"))
+        self.assertTrue(is_newer_version("1.5.2", "1.5.1"))
+        self.assertFalse(is_newer_version("1.5.1", "1.5.1"))
+        self.assertFalse(is_newer_version("1.5.0", "1.5.1"))
 
     def test_web_redirect_fallback(self):
         res = _check_github_latest_web(timeout=8)
@@ -101,6 +101,26 @@ class TestUpdaterHardening(unittest.TestCase):
         finally:
             updater_mod._http_get_json = orig_http
             updater_mod._check_github_latest_web = orig_web
+
+    def test_settings_panel_installing_state(self):
+        panel = SettingsPanel(None)
+        # Test download at 65%
+        panel.set_update_state("downloading", progress=65)
+        self.assertEqual(panel.update_status_label.text(), "Downloading update... 65%")
+        self.assertEqual(panel.update_action_btn.text(), "65%")
+        self.assertFalse(panel.update_action_btn.isEnabled())
+
+        # Test download at 100% (should immediately switch to Installing . . .)
+        panel.set_update_state("downloading", progress=100)
+        self.assertEqual(panel.update_status_label.text(), "Installing . . .")
+        self.assertEqual(panel.update_action_btn.text(), "Installing...")
+        self.assertFalse(panel.update_action_btn.isEnabled())
+
+        # Test installing state explicitly
+        panel.set_update_state("installing", progress=100, message="Installing . . .")
+        self.assertEqual(panel.update_status_label.text(), "Installing . . .")
+        self.assertEqual(panel.update_action_btn.text(), "Installing...")
+        self.assertFalse(panel.update_action_btn.isEnabled())
 
     def test_settings_panel_browser_escape_hatch(self):
         panel = SettingsPanel(None)
