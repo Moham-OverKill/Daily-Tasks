@@ -2523,9 +2523,24 @@ class AddPageButton(AnimatedPushButton):
 
 class NoteHoverCard(QFrame):
     """
-    Sleek floating popover displaying note Title and Description with solid, readable background
-    and smooth opacity & subtle slide-in animations.
+    Sleek floating popover displaying note Title and Description with solid, readable background.
+    Uses a singleton instance with instant show/hide to eliminate duplicate cards and stacking.
     """
+    _SHARED_CARD = None
+
+    @classmethod
+    def get_shared(cls, parent=None):
+        try:
+            if cls._SHARED_CARD is not None:
+                _ = cls._SHARED_CARD.isVisible()
+                return cls._SHARED_CARD
+        except RuntimeError:
+            cls._SHARED_CARD = None
+
+        if cls._SHARED_CARD is None:
+            cls._SHARED_CARD = NoteHoverCard(parent)
+        return cls._SHARED_CARD
+
     def __init__(self, parent=None):
         super().__init__(parent, Qt.ToolTip | Qt.FramelessWindowHint)
         self.setObjectName("NoteHoverCard")
@@ -2600,44 +2615,24 @@ class NoteHoverCard(QFrame):
         hint = self.sizeHint()
         self.resize(hint)
 
-    def show_animated(self, target_pos: QPoint):
+    def show_instant(self, target_pos: QPoint):
         if self._fade_anim is not None:
             self._fade_anim.stop()
-
-        self._fade_anim = QVariantAnimation(self)
-        self._fade_anim.setDuration(140)
-        self._fade_anim.setEasingCurve(QEasingCurve.OutCubic)
-        start_op = self._opacity_effect.opacity() if self.isVisible() else 0.0
-        self._fade_anim.setStartValue(float(start_op))
-        self._fade_anim.setEndValue(1.0)
-
-        start_y = target_pos.y() + 4
-        def _on_step(v: float):
-            self._opacity_effect.setOpacity(v)
-            cur_y = int(start_y - 4 * v)
-            self.move(target_pos.x(), cur_y)
-
-        self._fade_anim.valueChanged.connect(_on_step)
-        self.move(target_pos.x(), start_y)
-        self._opacity_effect.setOpacity(start_op)
+        self.move(target_pos)
+        self._opacity_effect.setOpacity(1.0)
         self.show()
-        self._fade_anim.start()
+
+    def hide_instant(self):
+        if self._fade_anim is not None:
+            self._fade_anim.stop()
+        self._opacity_effect.setOpacity(0.0)
+        self.hide()
+
+    def show_animated(self, target_pos: QPoint):
+        self.show_instant(target_pos)
 
     def hide_animated(self):
-        if not self.isVisible():
-            return
-        if self._fade_anim is not None:
-            self._fade_anim.stop()
-
-        self._fade_anim = QVariantAnimation(self)
-        self._fade_anim.setDuration(110)
-        self._fade_anim.setEasingCurve(QEasingCurve.InCubic)
-        start_op = self._opacity_effect.opacity()
-        self._fade_anim.setStartValue(float(start_op))
-        self._fade_anim.setEndValue(0.0)
-        self._fade_anim.valueChanged.connect(self._opacity_effect.setOpacity)
-        self._fade_anim.finished.connect(self.hide)
-        self._fade_anim.start()
+        self.hide_instant()
 
 
 class NoteIconButton(AnimatedPushButton):
@@ -2782,12 +2777,11 @@ class NoteIconButton(AnimatedPushButton):
     def _show_hover_card(self):
         if not self.title or self._is_dragging:
             return
-        if self._hover_card is None:
-            self._hover_card = NoteHoverCard()
-        self._hover_card.set_note_content(self.title, self.description, self.current_theme)
+        card = NoteHoverCard.get_shared()
+        card.set_note_content(self.title, self.description, self.current_theme)
 
-        card_w = self._hover_card.width()
-        card_h = self._hover_card.height()
+        card_w = card.width()
+        card_h = card.height()
         btn_pos = self.mapToGlobal(QPoint(0, 0))
 
         win = self.window()
@@ -2804,11 +2798,13 @@ class NoteIconButton(AnimatedPushButton):
         if win and win.isVisible() and btn_pos.y() > 0 and target_y < win_pos.y() + 10:
             target_y = btn_pos.y() + self.height() + 6
 
-        self._hover_card.show_animated(QPoint(target_x, target_y))
+        self._hover_card = card
+        card.show_instant(QPoint(target_x, target_y))
 
     def _hide_hover_card(self):
-        if self._hover_card:
-            self._hover_card.hide_animated()
+        card = NoteHoverCard.get_shared()
+        if card:
+            card.hide_instant()
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
@@ -2895,9 +2891,7 @@ class NoteIconButton(AnimatedPushButton):
 
     def cleanup(self):
         self._hide_hover_card()
-        if self._hover_card:
-            self._hover_card.deleteLater()
-            self._hover_card = None
+        self._hover_card = None
 
 
 class AddNoteButton(AnimatedPushButton):
