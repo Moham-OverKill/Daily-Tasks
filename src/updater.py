@@ -10,11 +10,12 @@ import sys
 import tempfile
 import threading
 import subprocess
-from PySide6.QtCore import QObject, Signal
+from PySide6.QtCore import QObject, Signal, QTimer
 
 from .api_handler import _http_get_json
 from .constants import (
     APP_VERSION,
+    GITHUB_REPO,
     GITHUB_RELEASES_API_URL,
     GITHUB_RELEASES_PAGE_URL,
     INSTALLER_ASSET_NAME,
@@ -51,6 +52,99 @@ def is_newer_version(latest: str, current: str = APP_VERSION) -> bool:
     v_lat = v_lat + (0,) * (max_len - len(v_lat))
     v_cur = v_cur + (0,) * (max_len - len(v_cur))
     return v_lat > v_cur
+
+
+def _check_github_latest_web(timeout: int = 8) -> dict:
+    """
+    Fallback checker immune to GitHub unauthenticated REST API rate limits (HTTP 403).
+    Resolves the latest release tag by inspecting the HTTP redirect target of
+    'https://github.com/{GITHUB_REPO}/releases/latest' -> '.../releases/tag/vX.Y.Z'.
+    Returns a dict with 'tag_name', 'html_url', and 'asset_url', or None on failure.
+    """
+    web_url = GITHUB_RELEASES_PAGE_URL
+    tag_name = ""
+
+    # Strategy 1: WinINet on Windows (zero Python SSL/networking dependencies)
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            wininet = ctypes.windll.wininet
+            wininet.InternetOpenW.restype = ctypes.c_void_p
+            wininet.InternetOpenUrlW.restype = ctypes.c_void_p
+
+            h_inet = wininet.InternetOpenW(f"DailyTasks/{APP_VERSION}", 0, None, None, 0)
+            if h_inet:
+                try:
+                    timeout_ms = ctypes.c_uint(max(1000, int(timeout * 1000)))
+                    wininet.InternetSetOptionW(ctypes.c_void_p(h_inet), 2, ctypes.byref(timeout_ms), ctypes.sizeof(timeout_ms))
+                    wininet.InternetSetOptionW(ctypes.c_void_p(h_inet), 5, ctypes.byref(timeout_ms), ctypes.sizeof(timeout_ms))
+                    wininet.InternetSetOptionW(ctypes.c_void_p(h_inet), 6, ctypes.byref(timeout_ms), ctypes.sizeof(timeout_ms))
+
+                    INTERNET_FLAG_RELOAD = 0x80000000
+                    h_url = wininet.InternetOpenUrlW(
+                        ctypes.c_void_p(h_inet),
+                        web_url,
+                        None,
+                        0,
+                        INTERNET_FLAG_RELOAD,
+                        0,
+                    )
+                    if h_url:
+                        try:
+                            # INTERNET_OPTION_URL = 34 queries the effective/final URL after redirects
+                            buf = ctypes.create_unicode_buffer(1024)
+                            buflen = ctypes.c_ulong(ctypes.sizeof(buf))
+                            if wininet.InternetQueryOptionW(ctypes.c_void_p(h_url), 34, buf, ctypes.byref(buflen)):
+                                final_url = str(buf.value).strip()
+                                m = re.search(r"/releases/tag/([^/?#]+)", final_url)
+                                if m:
+                                    tag_name = m.group(1).strip()
+                        finally:
+                            wininet.InternetCloseHandle(ctypes.c_void_p(h_url))
+                finally:
+                    wininet.InternetCloseHandle(ctypes.c_void_p(h_inet))
+        except Exception:
+            pass
+
+    # Strategy 2: stdlib urllib.request fallback (inspects HTTP 302/301 Location header)
+    if not tag_name:
+        try:
+            import urllib.request
+            import urllib.error
+
+            class _NoRedirect(urllib.request.HTTPRedirectHandler):
+                def redirect_request(self, req, fp, code, msg, headers, newurl):
+                    return None
+
+            opener = urllib.request.build_opener(_NoRedirect)
+            req = urllib.request.Request(
+                web_url,
+                headers={"User-Agent": f"DailyTasks/{APP_VERSION}"},
+                method="HEAD",
+            )
+            try:
+                resp = opener.open(req, timeout=timeout)
+                final_url = resp.geturl() if hasattr(resp, "geturl") else ""
+                m = re.search(r"/releases/tag/([^/?#]+)", final_url)
+                if m:
+                    tag_name = m.group(1).strip()
+            except urllib.error.HTTPError as e:
+                loc = e.headers.get("Location") or ""
+                m = re.search(r"/releases/tag/([^/?#]+)", loc)
+                if m:
+                    tag_name = m.group(1).strip()
+        except Exception:
+            pass
+
+    if tag_name:
+        html_url = f"https://github.com/{GITHUB_REPO}/releases/tag/{tag_name}"
+        asset_url = f"https://github.com/{GITHUB_REPO}/releases/download/{tag_name}/{INSTALLER_ASSET_NAME}"
+        return {
+            "tag_name": tag_name,
+            "html_url": html_url,
+            "asset_url": asset_url,
+        }
+    return None
 
 
 def _download_file_stream(url: str, dest_path: str, progress_cb=None, timeout: int = 30) -> bool:
@@ -154,6 +248,7 @@ def _download_file_stream(url: str, dest_path: str, progress_cb=None, timeout: i
     # Fallback: stdlib urllib.request
     try:
         import urllib.request
+        import ssl
 
         req = urllib.request.Request(
             url,
@@ -162,7 +257,14 @@ def _download_file_stream(url: str, dest_path: str, progress_cb=None, timeout: i
                 "Accept": "application/octet-stream",
             },
         )
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        try:
+            resp_cm = urllib.request.urlopen(req, timeout=timeout)
+        except Exception as ssl_err:
+            # If standard SSL verification fails (e.g. corporate proxy / antivirus TLS interception), retry with unverified context
+            ctx = ssl._create_unverified_context()
+            resp_cm = urllib.request.urlopen(req, timeout=timeout, context=ctx)
+
+        with resp_cm as resp:
             if getattr(resp, "status", 200) >= 400:
                 return False
             total_bytes = int(resp.headers.get("Content-Length", 0) or 0)
@@ -210,67 +312,110 @@ class UpdateManager(QObject):
     download_progress = Signal(int)              # 0..100
     download_finished = Signal(str)              # local_installer_path
     download_failed = Signal(str)                # error_message
+    _check_finished = Signal()                   # internal thread-safe signal to stop watchdog
 
     def __init__(self, parent=None, on_quit_callback=None):
         super().__init__(parent)
         self._checking = False
         self._downloading = False
+        self.is_interactive_check = False
         self._on_quit_callback = on_quit_callback
         self.latest_version = ""
         self.download_url = ""
         self.release_html_url = GITHUB_RELEASES_PAGE_URL
+        self._watchdog_timer = None
+        self._check_finished.connect(self._stop_watchdog)
+
+    def _stop_watchdog(self):
+        if self._watchdog_timer is not None:
+            self._watchdog_timer.stop()
+
+    def _on_watchdog_timeout(self):
+        if self._checking:
+            self._checking = False
+            if self.is_interactive_check:
+                self.check_failed.emit("Connection timed out. Please check your internet connection.")
+            else:
+                self.up_to_date.emit(APP_VERSION)
 
     @property
     def is_busy(self) -> bool:
         return self._checking or self._downloading
 
     def check_for_updates(self, silent: bool = False):
-        """Check GitHub Releases API on a background daemon thread."""
+        """Check GitHub Releases API with rate-limit resilient web redirect fallback."""
         if self._checking or self._downloading:
             return
         self._checking = True
-        self.check_started.emit()
+        self.is_interactive_check = not silent
+
+        if not silent:
+            if self._watchdog_timer is None:
+                self._watchdog_timer = QTimer(self)
+                self._watchdog_timer.setSingleShot(True)
+                self._watchdog_timer.timeout.connect(self._on_watchdog_timeout)
+            self._watchdog_timer.stop()
+            self._watchdog_timer.start(12000)
+            self.check_started.emit()
 
         def _worker():
             try:
-                data = _http_get_json(
-                    GITHUB_RELEASES_API_URL,
-                    headers={"Accept": "application/vnd.github+json"},
-                    timeout=10,
-                )
-                if not isinstance(data, dict) or "tag_name" not in data:
+                tag_name = ""
+                asset_url = ""
+                html_url = GITHUB_RELEASES_PAGE_URL
+
+                # 1. Primary: GitHub REST API
+                try:
+                    data = _http_get_json(
+                        GITHUB_RELEASES_API_URL,
+                        headers={"Accept": "application/vnd.github+json"},
+                        timeout=8,
+                    )
+                    if isinstance(data, dict) and "tag_name" in data:
+                        tag_name = str(data.get("tag_name") or "").strip()
+                        html_url = str(data.get("html_url") or GITHUB_RELEASES_PAGE_URL)
+                        assets = data.get("assets") or []
+                        if isinstance(assets, list):
+                            for asset in assets:
+                                if not isinstance(asset, dict):
+                                    continue
+                                name = str(asset.get("name") or "")
+                                dl_url = str(asset.get("browser_download_url") or "")
+                                if name.lower() == INSTALLER_ASSET_NAME.lower() and dl_url:
+                                    asset_url = dl_url
+                                    break
+                            if not asset_url:
+                                for asset in assets:
+                                    if not isinstance(asset, dict):
+                                        continue
+                                    name = str(asset.get("name") or "")
+                                    dl_url = str(asset.get("browser_download_url") or "")
+                                    if name.lower().endswith(".exe") and dl_url:
+                                        asset_url = dl_url
+                                        break
+                except Exception:
+                    pass
+
+                # 2. Resilient Fallback: Web redirect tracking (immune to REST API 60 req/hr rate limits)
+                if not tag_name:
+                    web_res = _check_github_latest_web(timeout=8)
+                    if web_res:
+                        tag_name = web_res.get("tag_name") or ""
+                        html_url = web_res.get("html_url") or html_url
+                        asset_url = web_res.get("asset_url") or asset_url
+
+                self._check_finished.emit()
+
+                if not tag_name:
                     if not silent:
-                        msg = "Could not reach GitHub Releases."
-                        if isinstance(data, dict) and "message" in data:
-                            msg = str(data["message"])
-                        self.check_failed.emit(msg)
+                        self.check_failed.emit("Could not reach GitHub Releases. Please check your internet connection.")
+                    else:
+                        self.up_to_date.emit(APP_VERSION)
                     return
 
-                tag_name = str(data.get("tag_name") or "").strip()
                 clean_ver = tag_name.lstrip("vV").strip() or APP_VERSION
-                html_url = str(data.get("html_url") or GITHUB_RELEASES_PAGE_URL)
-
-                # Locate DailyTasksSetup.exe asset URL
-                asset_url = ""
-                assets = data.get("assets") or []
-                if isinstance(assets, list):
-                    for asset in assets:
-                        if not isinstance(asset, dict):
-                            continue
-                        name = str(asset.get("name") or "")
-                        dl_url = str(asset.get("browser_download_url") or "")
-                        if name.lower() == INSTALLER_ASSET_NAME.lower() and dl_url:
-                            asset_url = dl_url
-                            break
-                    if not asset_url:
-                        for asset in assets:
-                            if not isinstance(asset, dict):
-                                continue
-                            name = str(asset.get("name") or "")
-                            dl_url = str(asset.get("browser_download_url") or "")
-                            if name.lower().endswith(".exe") and dl_url:
-                                asset_url = dl_url
-                                break
+                if not asset_url:
+                    asset_url = f"https://github.com/{GITHUB_REPO}/releases/download/{tag_name}/{INSTALLER_ASSET_NAME}"
 
                 if is_newer_version(clean_ver, APP_VERSION):
                     self.latest_version = clean_ver
@@ -280,8 +425,11 @@ class UpdateManager(QObject):
                 else:
                     self.up_to_date.emit(APP_VERSION)
             except Exception as e:
+                self._check_finished.emit()
                 if not silent:
                     self.check_failed.emit(str(e))
+                else:
+                    self.up_to_date.emit(APP_VERSION)
             finally:
                 self._checking = False
 
@@ -377,6 +525,7 @@ class UpdateManager(QObject):
             subprocess.Popen(
                 [
                     installer_path,
+                    "/SP-",
                     "/VERYSILENT",
                     "/SUPPRESSMSGBOXES",
                     "/NORESTART",

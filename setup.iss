@@ -14,7 +14,8 @@ WizardStyle=modern
 OutputDir=.\Output
 OutputBaseFilename=DailyTasksSetup
 LicenseFile=license.txt
-CloseApplications=no
+CloseApplications=yes
+RestartApplications=yes
 Compression=lzma2/ultra64
 SolidCompression=yes
 LZMADictionarySize=65536
@@ -65,7 +66,7 @@ begin
   Exec('taskkill.exe', '/F /IM "Daily Tasks.exe"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   if WizardSilent() then
   begin
-    Sleep(350);
+    Sleep(1000);
   end;
   
   // Check if already installed and offer to uninstall (skip prompt during silent in-app updates)

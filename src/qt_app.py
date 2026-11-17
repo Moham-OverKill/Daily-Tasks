@@ -2886,6 +2886,8 @@ class DailyTasksWindow(QMainWindow):
         if self.tray_icon:
             self.tray_icon.hide()  # Remove icon from tray
         QApplication.quit()
+        # Hard-exit safety guard to ensure file handles on Daily Tasks.exe are released immediately for updates
+        QTimer.singleShot(250, lambda: os._exit(0))
 
 
 # ═══════════════════════════════════════════════════════════

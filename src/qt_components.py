@@ -28,7 +28,7 @@ import os
 import sys
 import shutil
 import uuid
-from .constants import APP_VERSION, GLOBAL_EMOJI_ENGINE
+from .constants import APP_VERSION, GLOBAL_EMOJI_ENGINE, GITHUB_RELEASES_PAGE_URL
 
 _TIME_FMT_CACHE = {}
 
@@ -4018,17 +4018,20 @@ class SettingsPanel(QFrame):
         self.update_version_label.setText(f"Version {APP_VERSION}")
 
         if self._update_state == "checking":
+            self.update_status_label.setOpenExternalLinks(False)
             self.update_status_label.setText("Checking for updates...")
             self.update_action_btn.setText("Checking...")
             self.update_action_btn.setEnabled(False)
             self.update_progress_bar.hide()
         elif self._update_state == "update_available":
+            self.update_status_label.setOpenExternalLinks(False)
             ver_text = f"v{self._update_version}" if self._update_version else "New version"
             self.update_status_label.setText(f"{ver_text} available")
             self.update_action_btn.setText(f"Install {ver_text}")
             self.update_action_btn.setEnabled(True)
             self.update_progress_bar.hide()
         elif self._update_state == "downloading":
+            self.update_status_label.setOpenExternalLinks(False)
             pct = self._update_progress
             self.update_status_label.setText(f"Downloading update... {pct}%")
             self.update_action_btn.setText(f"{pct}%")
@@ -4037,14 +4040,18 @@ class SettingsPanel(QFrame):
             self.update_progress_bar.show()
         elif self._update_state == "error":
             err_msg = self._update_message or "Update check failed"
-            if len(err_msg) > 30:
-                err_msg = err_msg[:28] + "..."
-            self.update_status_label.setText(err_msg)
+            if len(err_msg) > 35:
+                err_msg = err_msg[:33] + "..."
+            self.update_status_label.setText(
+                f"{err_msg} • <a href='{GITHUB_RELEASES_PAGE_URL}' style='color: inherit; text-decoration: underline;'>Download in browser</a>"
+            )
+            self.update_status_label.setOpenExternalLinks(True)
             self.update_action_btn.setText("Retry")
             self.update_action_btn.setEnabled(True)
             self.update_progress_bar.hide()
         else:
             # "idle" or "up_to_date"
+            self.update_status_label.setOpenExternalLinks(False)
             self.update_status_label.setText(self._update_message or "Up to date")
             self.update_action_btn.setText("Check for Updates")
             self.update_action_btn.setEnabled(True)
