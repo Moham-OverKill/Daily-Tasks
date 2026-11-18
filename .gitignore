@@ -35,3 +35,40 @@ tests/scratch_data/
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# Environment variables & secrets
+.env
+.env.*
+*.env
+*.key
+*.pem
+*.pfx
+*.cert
+*.crt
+secrets.*
+
+# AI assistant configuration & preference files
+preferences.md
+.cursorrules
+.cursor/
+CLAUDE.md
+.claude/
+agents/
+prompt*.md
+*.prompt.md
+
+# Local runtime databases & persistent stores
+*.db
+*.sqlite
+*.sqlite3
+notes_store.json
+tasks.json
+tasks.json.bak
+settings.json
+prayers_cache.json
+
+# Cache directories & backup files
+*.log
+.pytest_cache/
+.mypy_cache/
+*.bak

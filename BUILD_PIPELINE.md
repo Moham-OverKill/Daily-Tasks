@@ -49,7 +49,7 @@ python -m unittest discover -s tests -p "test_*.py" -v
 py -m PyInstaller DailyTasks.spec --noconfirm
 
 # Step 3: Compile ultra-compressed setup package
-& ".\node_modules\innosetup\bin\ISCC.exe" ".\setup.iss"
+& ".\node_modules\innosetup\bin\ISCC.exe" "setup.iss"
 ```
 
 ---

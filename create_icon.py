@@ -1,7 +1,7 @@
 from PIL import Image, ImageDraw
 import os
 
-assets_dir = os.path.join(".", "assets")
+assets_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
 os.makedirs(assets_dir, exist_ok=True)
 
 # Create a 256x256 image

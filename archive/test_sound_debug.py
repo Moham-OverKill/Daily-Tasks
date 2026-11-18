@@ -3,7 +3,7 @@ import os
 import time
 
 try:
-    base_dir = r"."
+    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     path = os.path.join(base_dir, "assets", "sounds", "start.wav")
     
     print(f"Testing Disk Playback for {path}...")

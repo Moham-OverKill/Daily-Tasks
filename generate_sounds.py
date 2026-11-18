@@ -190,4 +190,4 @@ def generate_sound_assets(base_dir):
         f.writeframes(drop)
 
 if __name__ == "__main__":
-    generate_sound_assets(".")
+    generate_sound_assets(os.path.dirname(os.path.abspath(__file__)))

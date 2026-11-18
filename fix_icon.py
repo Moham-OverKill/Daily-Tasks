@@ -2,7 +2,7 @@ from PIL import Image, ImageDraw, ImageOps
 import os
 
 try:
-    assets_dir = os.path.join(".", "assets")
+    assets_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
     icon_path = os.path.join(assets_dir, "icon.png")
     
     if not os.path.exists(icon_path):

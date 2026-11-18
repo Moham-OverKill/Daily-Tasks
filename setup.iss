@@ -11,7 +11,7 @@ DisableDirPage=yes
 DisableReadyPage=yes
 PrivilegesRequired=lowest
 WizardStyle=modern
-OutputDir=.\Output
+OutputDir=Output
 OutputBaseFilename=DailyTasksSetup
 LicenseFile=license.txt
 CloseApplications=yes
@@ -34,8 +34,8 @@ ClickFinish=
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Files]
-Source: ".\dist\Daily Tasks\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
-Source: ".\assets\icon.ico"; DestDir: "{app}"; Flags: ignoreversion
+Source: "dist\Daily Tasks\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "assets\icon.ico"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 Name: "{autoprograms}\Daily Tasks"; Filename: "{app}\Daily Tasks.exe"; IconFilename: "{app}\icon.ico"
