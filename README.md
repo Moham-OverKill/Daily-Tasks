@@ -32,13 +32,23 @@ Run the setup file, follow the quick installation steps, and start adding your t
 
 ## Running from Source
 
-```bash
+### Quick Start (PowerShell - One Line)
+Paste this single command into PowerShell to download, install dependencies, and launch automatically:
+```powershell
+cd $HOME; git clone https://github.com/Moham-OverKill/Daily-Tasks.git; cd Daily-Tasks; .\run.bat
+```
+
+### Step-by-Step
+```powershell
+# 1. Navigate to your user directory (avoids permission errors if terminal started in System32)
+cd $HOME
+
+# 2. Clone and enter the repository
 git clone https://github.com/Moham-OverKill/Daily-Tasks.git
 cd Daily-Tasks
-python -m venv .venv
-.venv\Scripts\activate
-pip install -r requirements.txt
-python start.py
+
+# 3. Run the automated setup launcher
+.\run.bat
 ```
 
 ---
