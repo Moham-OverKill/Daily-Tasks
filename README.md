@@ -28,6 +28,8 @@ Click the link below to get the installer:
 
 Run the setup file, follow the quick installation steps, and start adding your tasks.
 
+> **First-Time Windows Notice**: Because Daily Tasks is a newly released independent application, Windows SmartScreen may display an unrecognized app notice on first launch. Click **More info** $\rightarrow$ **Run anyway** to proceed. Daily Tasks is 100% open-source, fully offline, and collects zero personal data.
+
 ---
 
 ## Running from Source
@@ -50,12 +52,6 @@ cd Daily-Tasks
 # 3. Run the automated setup launcher
 .\run.bat
 ```
-
----
-
-## Code Signing & Integrity
-
-Free code signing provided by [SignPath.io](https://signpath.io/) certificate courtesy of the [SignPath Foundation](https://signpath.org/).
 
 ---
 
